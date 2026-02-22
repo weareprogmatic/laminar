@@ -1,0 +1,20 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Laminar",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${workspaceFolder}/cmd/laminar",
+            "args": [
+                "-config",
+                "${workspaceFolder}/laminar.json",
+                "-verbose"
+            ],
+            "cwd": "${workspaceFolder}",
+            "env": {},
+            "buildFlags": ""
+        }
+    ]
+}

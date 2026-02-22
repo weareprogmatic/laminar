@@ -1,0 +1,47 @@
+version: "2"
+
+linters-settings:
+  errcheck:
+    ignore: Close;Close\(
+  gocyclo:
+    min-complexity: 15
+  funlen:
+    lines: 80
+    statements: 40
+  gosec:
+    excludes:
+      - G304 # Exclude file inclusion checks (too strict for config)
+      - G702 # Deferred errors
+  revive:
+    ignore-generated-header: true
+    severity: warning
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+linters:
+  exclusions:
+    paths:
+      - "tools/"
+      - "tests/"
+      - "docs/"
+      - "scripts/"
+      - ".*_test\\.go"
+  enable:
+    - bodyclose
+    - sqlclosecheck
+    - gosec
+    - nilerr
+    - errorlint
+    - revive
+    - modernize
+    - staticcheck
+    - errcheck
+    - gocyclo
+    - gocognit
+    - funlen
+    - govet
+    - ineffassign
+    - noctx
+    - unused

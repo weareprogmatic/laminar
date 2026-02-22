@@ -1,0 +1,25 @@
+[
+  {
+    "name": "hello-service",
+    "port": 8081,
+    "binary": "./artifacts/hello",
+    "cors": [
+      "*"
+    ],
+    "methods": [
+      "GET",
+      "POST"
+    ],
+    "content_type": "application/json",
+    "response_mode": "lambda",
+    "timeout": 30,
+    "ignore_paths": [
+      "/favicon.ico",
+      "/.well-known/*"
+    ],
+    "env": {
+      "LOG_LEVEL": "debug",
+      "APP_ENV": "local"
+    }
+  }
+]
