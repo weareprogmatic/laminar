@@ -7,7 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"slices"
+	"strings"
 	"time"
 
 	"github.com/weareprogmatic/laminar/internal/config"
@@ -67,7 +67,6 @@ func (s *Server) buildHandler() http.Handler {
 	mux.HandleFunc("/", s.handleRequest)
 
 	handler := s.corsMiddleware(mux)
-	handler = s.methodFilterMiddleware(handler)
 	handler = s.loggingMiddleware(handler)
 
 	return handler
@@ -141,7 +140,7 @@ func (s *Server) handleLambdaResponse(w http.ResponseWriter, output []byte) {
 	}
 
 	if w.Header().Get("Content-Type") == "" {
-		w.Header().Set("Content-Type", s.config.ContentType)
+		w.Header().Set("Content-Type", s.config.ContentTypes[0])
 	}
 
 	w.WriteHeader(lambdaResp.StatusCode)
@@ -149,31 +148,25 @@ func (s *Server) handleLambdaResponse(w http.ResponseWriter, output []byte) {
 }
 
 func (s *Server) handleRawResponse(w http.ResponseWriter, output []byte) {
-	w.Header().Set("Content-Type", s.config.ContentType)
+	w.Header().Set("Content-Type", s.config.ContentTypes[0])
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(output)
 }
 
+//nolint:gocognit
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if len(s.config.Cors) > 0 {
-			origin := r.Header.Get("Origin")
-			allowed := false
+		if len(s.config.Cors) == 0 {
+			next.ServeHTTP(w, r)
+			return
+		}
 
-			for _, allowedOrigin := range s.config.Cors {
-				if allowedOrigin == "*" || allowedOrigin == origin {
-					w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
-					allowed = true
-					break
-				}
-			}
+		// Set Referrer-Policy to allow cross-origin requests
+		w.Header().Set("Referrer-Policy", "no-referrer")
 
-			if allowed || len(s.config.Cors) > 0 && s.config.Cors[0] == "*" {
-				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
-				w.Header().Set("Access-Control-Max-Age", "3600")
-				w.Header().Set("Access-Control-Allow-Credentials", "true")
-			}
+		origin := r.Header.Get("Origin")
+		if responseOrigin := s.matchCORSOrigin(origin); responseOrigin != "" {
+			s.setCORSHeaders(w, responseOrigin)
 		}
 
 		if r.Method == http.MethodOptions {
@@ -185,27 +178,46 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func (s *Server) methodFilterMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/health" {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		if r.Method == http.MethodOptions {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		if len(s.config.Methods) > 0 {
-			if !slices.Contains(s.config.Methods, r.Method) {
-				http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-				return
+// matchCORSOrigin returns the response origin value if the given origin matches a configured CORS origin,
+// or an empty string if there is no match.
+func (s *Server) matchCORSOrigin(origin string) string {
+	for _, allowedOrigin := range s.config.Cors {
+		if allowedOrigin == "*" {
+			if origin != "" {
+				return origin
 			}
+			return "*"
 		}
+		if allowedOrigin == origin {
+			return origin
+		}
+	}
+	return ""
+}
 
-		next.ServeHTTP(w, r)
-	})
+// setCORSHeaders sets Access-Control-* response headers for a matched origin.
+func (s *Server) setCORSHeaders(w http.ResponseWriter, responseOrigin string) {
+	w.Header().Set("Access-Control-Allow-Origin", responseOrigin)
+
+	if s.config.AllowCredentials {
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+	}
+
+	if len(s.config.Methods) > 0 {
+		w.Header().Set("Access-Control-Allow-Methods", strings.Join(s.config.Methods, ", "))
+	}
+
+	if len(s.config.AllowHeaders) > 0 {
+		w.Header().Set("Access-Control-Allow-Headers", strings.Join(s.config.AllowHeaders, ", "))
+	}
+
+	if len(s.config.ExposeHeaders) > 0 {
+		w.Header().Set("Access-Control-Expose-Headers", strings.Join(s.config.ExposeHeaders, ", "))
+	}
+
+	if s.config.MaxAge > 0 {
+		w.Header().Set("Access-Control-Max-Age", fmt.Sprintf("%d", s.config.MaxAge))
+	}
 }
 
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {

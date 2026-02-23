@@ -10,7 +10,19 @@
       "GET",
       "POST"
     ],
-    "content_type": "application/json",
+    "content_types": [
+      "application/json"
+    ],
+    "allow_headers": [
+      "Content-Type",
+      "Authorization",
+      "X-Api-Key"
+    ],
+    "expose_headers": [
+      "X-Request-Id"
+    ],
+    "max_age": 3600,
+    "allow_credentials": false,
     "response_mode": "lambda",
     "timeout": 30,
     "ignore_paths": [

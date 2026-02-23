@@ -115,6 +115,42 @@ func TestLoad(t *testing.T) {
 			wantErr: true,
 			errMsg:  "env_file",
 		},
+		{
+			name: "max_age too large",
+			content: `[{
+				"name": "test",
+				"port": 8080,
+				"binary": "./testdata/test-binary",
+				"max_age": 100000
+			}]`,
+			wantErr: true,
+			errMsg:  "max_age must be between 0 and 86400",
+		},
+		{
+			name: "max_age negative",
+			content: `[{
+				"name": "test",
+				"port": 8080,
+				"binary": "./testdata/test-binary",
+				"max_age": -1
+			}]`,
+			wantErr: true,
+			errMsg:  "max_age must be between 0 and 86400",
+		},
+		{
+			name: "valid CORS config with all fields",
+			content: `[{
+				"name": "test",
+				"port": 8080,
+				"binary": "./testdata/test-binary",
+				"cors": ["*"],
+				"allow_headers": ["Content-Type", "Authorization"],
+				"expose_headers": ["X-Request-Id"],
+				"max_age": 3600,
+				"allow_credentials": true
+			}]`,
+			wantErr: false,
+		},
 	}
 
 	setupTestBinary := func(t *testing.T) {
@@ -178,7 +214,7 @@ func TestApplyDefaults(t *testing.T) {
 				Name:         "test",
 				Port:         8080,
 				Binary:       "/bin/test",
-				ContentType:  "application/json",
+				ContentTypes: []string{"application/json"},
 				ResponseMode: "lambda",
 				Timeout:      30,
 				Methods:      []string{},
@@ -190,7 +226,7 @@ func TestApplyDefaults(t *testing.T) {
 				Name:         "test",
 				Port:         8080,
 				Binary:       "/bin/test",
-				ContentType:  "text/plain",
+				ContentTypes: []string{"text/plain"},
 				ResponseMode: "raw",
 				Timeout:      60,
 				Methods:      []string{"get", "post"},
@@ -199,10 +235,51 @@ func TestApplyDefaults(t *testing.T) {
 				Name:         "test",
 				Port:         8080,
 				Binary:       "/bin/test",
-				ContentType:  "text/plain",
+				ContentTypes: []string{"text/plain"},
 				ResponseMode: "raw",
 				Timeout:      60,
 				Methods:      []string{"GET", "POST"},
+			},
+		},
+		{
+			name: "apply CORS defaults when CORS enabled",
+			input: ServiceConfig{
+				Name:   "test",
+				Port:   8080,
+				Binary: "/bin/test",
+				Cors:   []string{"*"},
+			},
+			expected: ServiceConfig{
+				Name:         "test",
+				Port:         8080,
+				Binary:       "/bin/test",
+				Cors:         []string{"*"},
+				ContentTypes: []string{"application/json"},
+				ResponseMode: "lambda",
+				Timeout:      30,
+				Methods:      []string{},
+				AllowHeaders: []string{"Content-Type"},
+			},
+		},
+		{
+			name: "preserve custom CORS headers",
+			input: ServiceConfig{
+				Name:         "test",
+				Port:         8080,
+				Binary:       "/bin/test",
+				Cors:         []string{"*"},
+				AllowHeaders: []string{"Authorization", "X-Api-Key"},
+			},
+			expected: ServiceConfig{
+				Name:         "test",
+				Port:         8080,
+				Binary:       "/bin/test",
+				Cors:         []string{"*"},
+				ContentTypes: []string{"application/json"},
+				ResponseMode: "lambda",
+				Timeout:      30,
+				Methods:      []string{},
+				AllowHeaders: []string{"Authorization", "X-Api-Key"},
 			},
 		},
 	}
@@ -211,8 +288,8 @@ func TestApplyDefaults(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			applyDefaults(&tt.input)
 
-			if tt.input.ContentType != tt.expected.ContentType {
-				t.Errorf("ContentType = %v, want %v", tt.input.ContentType, tt.expected.ContentType)
+			if len(tt.input.ContentTypes) != len(tt.expected.ContentTypes) || (len(tt.input.ContentTypes) > 0 && tt.input.ContentTypes[0] != tt.expected.ContentTypes[0]) {
+				t.Errorf("ContentTypes = %v, want %v", tt.input.ContentTypes, tt.expected.ContentTypes)
 			}
 			if tt.input.ResponseMode != tt.expected.ResponseMode {
 				t.Errorf("ResponseMode = %v, want %v", tt.input.ResponseMode, tt.expected.ResponseMode)
@@ -223,6 +300,14 @@ func TestApplyDefaults(t *testing.T) {
 			for i, method := range tt.input.Methods {
 				if method != tt.expected.Methods[i] {
 					t.Errorf("Methods[%d] = %v, want %v", i, method, tt.expected.Methods[i])
+				}
+			}
+			if len(tt.input.AllowHeaders) != len(tt.expected.AllowHeaders) {
+				t.Errorf("AllowHeaders = %v, want %v", tt.input.AllowHeaders, tt.expected.AllowHeaders)
+			}
+			for i, header := range tt.input.AllowHeaders {
+				if i < len(tt.expected.AllowHeaders) && header != tt.expected.AllowHeaders[i] {
+					t.Errorf("AllowHeaders[%d] = %v, want %v", i, header, tt.expected.AllowHeaders[i])
 				}
 			}
 		})

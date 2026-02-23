@@ -16,7 +16,7 @@ Laminar is a high-performance Go CLI that orchestrates local AWS Lambda endpoint
 - **Streaming & SSE**: Full support for Server-Sent Events and streaming responses
 - **Response Modes**: Parse Lambda structured responses or stream raw output
 - **Environment Management**: Load environment variables from `.env` files per service
-- **CORS & Method Filtering**: Built-in middleware for cross-origin requests and HTTP method control
+- **CORS Support**: Built-in middleware for cross-origin requests matching AWS Lambda Function URL behavior
 - **Health Checks**: Automatic `/health` endpoint on every service
 - **Graceful Shutdown**: Handles `SIGINT`/`SIGTERM` with proper cleanup
 - **Zero Dependencies**: Core Laminar built entirely with Go standard library
@@ -35,26 +35,20 @@ go install github.com/weareprogmatic/laminar/cmd/laminar@latest
 package main
 
 import (
-    "encoding/json"
-    "fmt"
-    "io"
-    "os"
+    "context"
+    "github.com/aws/aws-lambda-go/events"
+    "github.com/aws/aws-lambda-go/lambda"
 )
 
-type LambdaResponse struct {
-    StatusCode int    `json:"statusCode"`
-    Body       string `json:"body"`
+func handler(_ context.Context, request events.LambdaFunctionURLRequest) (events.LambdaFunctionURLResponse, error) {
+    return events.LambdaFunctionURLResponse{
+        StatusCode: 200,
+        Body:       "Hello from Lambda!",
+    }, nil
 }
 
 func main() {
-    io.ReadAll(os.Stdin) // Read Lambda payload from stdin
-    
-    response := LambdaResponse{
-        StatusCode: 200,
-        Body:       "Hello from Lambda!",
-    }
-    
-    json.NewEncoder(os.Stdout).Encode(response)
+    lambda.Start(handler)
 }
 ```
 
@@ -104,7 +98,7 @@ curl http://localhost:8080
 | `port` | integer | ✓ | | HTTP port (1-65535) |
 | `binary` | string | ✓ | | Path to executable |
 | `cors` | array | | `[]` | Allowed CORS origins (use `["*"]` for all) |
-| `methods` | array | | `[]` | Allowed HTTP methods (empty = allow all) |
+| `methods` | array | | `[]` | CORS-only: sets `Access-Control-Allow-Methods` header (no request filtering) |
 | `content_type` | string | | `"application/json"` | Default Content-Type header |
 | `response_mode` | string | | `"lambda"` | Response handling: `"lambda"` or `"raw"` |
 | `env_file` | string | | | Path to `.env` file for environment variables |
@@ -268,21 +262,32 @@ Options:
                   │  HTTP Request   │
                   └─────────┬───────┘
                             │
-                  ┌─────────▼────────┐
-                  │ map to Lambda V2 │
-                  │   JSON payload   │
-                  └─────────┬────────┘
-                            │
-                  ┌─────────▼────────┐
-                  │  fork() binary   │
-                  │  pipe payload    │
-                  │   via stdin      │
-                  └─────────┬────────┘
-                            │
-                  ┌─────────▼────────┐
-                  │   stream stdout  │
-                  │  to HTTP client  │
-                  └──────────────────┘
+                  ┌─────────▼──────────────┐
+   ┌──────────────┤ Mock Runtime API      │
+   │              │ (AWS Lambda Protocol) │
+   │              └─────────┬──────────────┘
+   │                        │
+   ▼                        ▼
+┌─────────────┐   ┌─────────────────┐
+│ fork binary │   │ Lambda.Start()  │
+│    setup    │   │  polls GET      │
+│AWS_LAMBDA_  │────────────┤        │
+│ RUNTIME_API │   │  receives V2.0  │
+│             │   │  JSON payload   │
+│             │   └─────────┬───────┘
+│             │             │
+├─────────────┤  handler() processes request
+│ binary      │             │
+│ /runtime/   │   ┌─────────▼───────┐
+│  invocation │   │ POST response   │
+│  response   │───────────┤  to      │
+│ (stream     │   │ Runtime API     │
+│  stdout)    │   └─────────┬───────┘
+│             │             │
+└─────────────┘   ┌─────────▼───────┐
+                  │  stream stdout  │
+                  │  to HTTP client │
+                  └─────────────────┘
 ```
 
 ## Development

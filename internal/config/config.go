@@ -9,18 +9,22 @@ import (
 
 // ServiceConfig holds the configuration for a single Lambda service.
 type ServiceConfig struct {
-	Name         string            `json:"name"`
-	Port         int               `json:"port"`
-	Binary       string            `json:"binary"`
-	Cors         []string          `json:"cors"`
-	Methods      []string          `json:"methods"`
-	ContentType  string            `json:"content_type,omitempty"`
-	EnvFile      string            `json:"env_file,omitempty"`
-	Env          map[string]string `json:"env,omitempty"`
-	WorkingDir   string            `json:"working_dir,omitempty"`
-	ResponseMode string            `json:"response_mode,omitempty"`
-	Timeout      int               `json:"timeout,omitempty"`
-	IgnorePaths  []string          `json:"ignore_paths,omitempty"`
+	Name             string            `json:"name"`
+	Port             int               `json:"port"`
+	Binary           string            `json:"binary"`
+	Cors             []string          `json:"cors"`
+	Methods          []string          `json:"methods"`
+	ContentTypes     []string          `json:"content_types"`
+	AllowHeaders     []string          `json:"allow_headers,omitempty"`
+	ExposeHeaders    []string          `json:"expose_headers,omitempty"`
+	MaxAge           int               `json:"max_age,omitempty"`
+	AllowCredentials bool              `json:"allow_credentials,omitempty"`
+	EnvFile          string            `json:"env_file,omitempty"`
+	Env              map[string]string `json:"env,omitempty"`
+	WorkingDir       string            `json:"working_dir,omitempty"`
+	ResponseMode     string            `json:"response_mode,omitempty"`
+	Timeout          int               `json:"timeout,omitempty"`
+	IgnorePaths      []string          `json:"ignore_paths,omitempty"`
 }
 
 // Load reads and validates a Laminar configuration file.
@@ -91,14 +95,18 @@ func validate(services []ServiceConfig) error {
 				return fmt.Errorf("service %s: env_file %s not found: %w", svc.Name, svc.EnvFile, err)
 			}
 		}
+
+		if svc.MaxAge < 0 || svc.MaxAge > 86400 {
+			return fmt.Errorf("service %s: max_age must be between 0 and 86400 seconds, got %d", svc.Name, svc.MaxAge)
+		}
 	}
 
 	return nil
 }
 
 func applyDefaults(svc *ServiceConfig) {
-	if svc.ContentType == "" {
-		svc.ContentType = "application/json"
+	if len(svc.ContentTypes) == 0 {
+		svc.ContentTypes = []string{"application/json"}
 	}
 
 	if svc.ResponseMode == "" {
@@ -107,6 +115,11 @@ func applyDefaults(svc *ServiceConfig) {
 
 	if svc.Timeout <= 0 {
 		svc.Timeout = 30
+	}
+
+	// Apply CORS defaults when CORS is enabled
+	if len(svc.Cors) > 0 && len(svc.AllowHeaders) == 0 {
+		svc.AllowHeaders = []string{"Content-Type"}
 	}
 
 	for i := range svc.Methods {
