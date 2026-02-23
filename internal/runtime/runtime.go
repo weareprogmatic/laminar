@@ -118,7 +118,14 @@ func (s *Server) handleInvocationResponse(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Read the response body
+	// Check if this is an error endpoint (ends with "/error")
+	urlPath := r.URL.Path
+	if len(urlPath) >= 6 && urlPath[len(urlPath)-6:] == "/error" {
+		s.handleInvocationError(w, r)
+		return
+	}
+
+	// Read the full response body
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Failed to read response", http.StatusInternalServerError)
@@ -127,38 +134,46 @@ func (s *Server) handleInvocationResponse(w http.ResponseWriter, r *http.Request
 
 	log.Printf("[Runtime API] Received %d bytes: %s", len(bodyBytes), string(bodyBytes))
 
-	// Check if this is an error endpoint (ends with "/error")
-	urlPath := r.URL.Path
-	if len(urlPath) >= 6 && urlPath[len(urlPath)-6:] == "/error" {
-		// Lambda reported an error
-		var errorPayload map[string]any
-		if err := json.Unmarshal(bodyBytes, &errorPayload); err != nil {
-			http.Error(w, "Invalid error payload", http.StatusBadRequest)
-			return
-		}
-		s.mu.Lock()
-		s.err = fmt.Errorf("lambda error: %v", errorPayload)
-		s.mu.Unlock()
-	} else {
-		// Lambda sent a successful response
-		s.mu.Lock()
-		s.response = bodyBytes
-		s.mu.Unlock()
-	}
+	s.mu.Lock()
+	s.response = bodyBytes
+	s.mu.Unlock()
 
 	w.WriteHeader(http.StatusAccepted)
+	s.signal()
+}
 
-	// Signal that we're done (but keep server alive for graceful shutdown)
+// handleInvocationError processes Lambda error responses.
+func (s *Server) handleInvocationError(w http.ResponseWriter, r *http.Request) {
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read error response", http.StatusInternalServerError)
+		return
+	}
+
+	var errorPayload map[string]any
+	if err := json.Unmarshal(bodyBytes, &errorPayload); err != nil {
+		http.Error(w, "Invalid error payload", http.StatusBadRequest)
+		return
+	}
+	s.mu.Lock()
+	s.err = fmt.Errorf("lambda error: %v", errorPayload)
+	s.mu.Unlock()
+
+	w.WriteHeader(http.StatusAccepted)
+	s.signal()
+}
+
+// signal closes the done channel once.
+func (s *Server) signal() {
 	select {
 	case <-s.done:
-		// Already closed
 	default:
 		close(s.done)
 		log.Printf("[Runtime API] Signaled done")
 	}
 }
 
-// Wait blocks until the Lambda sends a response or the channel is closed.
+// Wait blocks until the Lambda sends a buffered response or the channel is closed.
 func (s *Server) Wait() ([]byte, error) {
 	<-s.done
 	s.mu.Lock()

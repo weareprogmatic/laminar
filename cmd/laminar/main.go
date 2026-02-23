@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/weareprogmatic/laminar/internal/config"
+	"github.com/weareprogmatic/laminar/internal/invoke"
 	"github.com/weareprogmatic/laminar/internal/server"
 	"github.com/weareprogmatic/laminar/internal/version"
 )
@@ -46,6 +47,14 @@ func main() {
 		}
 	}
 
+	// Start the mock Lambda Service API so that Lambda-to-Lambda calls
+	// (e.g. lambda.Invoke / lambda.InvokeAsync) resolve to local binaries.
+	cleanup, err := setupInvokeServer(services)
+	if err != nil {
+		log.Fatalf("Failed to start Lambda Service API: %v", err)
+	}
+	defer cleanup()
+
 	// Create cancellable context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -74,4 +83,27 @@ func main() {
 	// Wait for all servers to finish
 	wg.Wait()
 	log.Println("All servers stopped. Goodbye!")
+}
+
+// setupInvokeServer starts the mock Lambda Service API and injects AWS_ENDPOINT_URL_LAMBDA
+// into each service's environment so Lambda-to-Lambda SDK calls resolve locally.
+// It returns a cleanup function that shuts down the server.
+func setupInvokeServer(services []config.ServiceConfig) (func(), error) {
+	srv, err := invoke.NewServer(services)
+	if err != nil {
+		return nil, err
+	}
+	srv.Start()
+	log.Printf("Lambda Service API listening on http://%s", srv.Addr())
+
+	endpoint := fmt.Sprintf("http://%s", srv.Addr())
+	for i := range services {
+		if services[i].Env == nil {
+			services[i].Env = make(map[string]string)
+		}
+		services[i].Env["AWS_ENDPOINT_URL_LAMBDA"] = endpoint
+		services[i].Env["AWS_LAMBDA_ENDPOINT"] = endpoint
+	}
+
+	return func() { _ = srv.Close() }, nil
 }

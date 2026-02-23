@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -56,53 +55,67 @@ func (f *filteredWriter) Write(p []byte) (n int, err error) {
 	return written, nil
 }
 
-// Run executes a binary with the given environment and payload, returning its stdout.
-// It starts a mock AWS Lambda Runtime API server that the Lambda will call back to.
-func Run(ctx context.Context, binary, envFile string, envVars map[string]string, workingDir string, timeoutSeconds int, payloadBytes []byte) ([]byte, error) {
-	timeoutCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
-	defer cancel()
+// lambdaCmd holds a started Lambda process and associated resources.
+type lambdaCmd struct {
+	cmd    *exec.Cmd
+	server *runtime.Server
+	ctx    context.Context
+	cancel context.CancelFunc
+}
 
-	// Create and start a runtime API server
-	runtimeServer, err := runtime.NewServer(payloadBytes)
+// launch creates a runtime API server, builds the environment, and starts the Lambda binary.
+// On error all resources are cleaned up before returning.
+func launch(ctx context.Context, binary, envFile string, envVars map[string]string, workingDir string, timeoutSeconds int, payloadBytes []byte) (*lambdaCmd, error) {
+	timeoutCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
+
+	srv, err := runtime.NewServer(payloadBytes)
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("failed to create runtime API server: %w", err)
 	}
-	defer func() { _ = runtimeServer.Close() }()
+	srv.Start()
 
-	runtimeServer.Start()
-
-	// Build environment with AWS_LAMBDA_RUNTIME_API pointing to our server
-	env, err := buildEnv(envFile, envVars, runtimeServer.Port())
+	env, err := buildEnv(envFile, envVars, srv.Port())
 	if err != nil {
+		cancel()
+		_ = srv.Close()
 		return nil, fmt.Errorf("failed to build environment: %w", err)
 	}
 
-	// Create filtered writer for Lambda logs
 	logWriter := &filteredWriter{serviceName: "lambda"}
-
-	// Start the Lambda binary
 	cmd := exec.CommandContext(timeoutCtx, binary)
 	cmd.Env = env
-	cmd.Stdout = logWriter // Filter Lambda's stdout
-	cmd.Stderr = logWriter // Filter Lambda's stderr (suppresses noisy AWS SDK logs)
-
-	// Set working directory if specified
+	cmd.Stdout = logWriter
+	cmd.Stderr = logWriter
 	if workingDir != "" {
 		cmd.Dir = workingDir
 	}
 
 	if err := cmd.Start(); err != nil {
+		cancel()
+		_ = srv.Close()
 		return nil, fmt.Errorf("failed to start binary %s: %w", binary, err)
 	}
 
-	// Wait for either the Lambda to respond or timeout
+	return &lambdaCmd{cmd: cmd, server: srv, ctx: timeoutCtx, cancel: cancel}, nil
+}
+
+// Run executes a binary with the given environment and payload, returning its stdout.
+// It starts a mock AWS Lambda Runtime API server that the Lambda will call back to.
+func Run(ctx context.Context, binary, envFile string, envVars map[string]string, workingDir string, timeoutSeconds int, payloadBytes []byte) ([]byte, error) {
+	lc, err := launch(ctx, binary, envFile, envVars, workingDir, timeoutSeconds, payloadBytes)
+	if err != nil {
+		return nil, err
+	}
+	defer lc.cancel()
+	defer func() { _ = lc.server.Close() }()
+
 	responseChan := make(chan struct {
 		response []byte
 		err      error
 	}, 1)
-
 	go func() {
-		response, err := runtimeServer.Wait()
+		response, err := lc.server.Wait()
 		responseChan <- struct {
 			response []byte
 			err      error
@@ -111,17 +124,14 @@ func Run(ctx context.Context, binary, envFile string, envVars map[string]string,
 
 	select {
 	case result := <-responseChan:
-		// Lambda responded, wait for process to exit
-		_ = cmd.Wait()
+		_ = lc.cmd.Wait()
 		if result.err != nil {
 			return nil, fmt.Errorf("lambda error: %w", result.err)
 		}
 		return result.response, nil
-
-	case <-timeoutCtx.Done():
-		// Timeout - kill the process
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+	case <-lc.ctx.Done():
+		_ = lc.cmd.Process.Kill()
+		_ = lc.cmd.Wait()
 		return nil, fmt.Errorf("binary %s timed out after %d seconds", binary, timeoutSeconds)
 	}
 }
@@ -242,17 +252,4 @@ func hasEnvVar(env []string, key string) bool {
 		}
 	}
 	return false
-}
-
-// StreamRun executes a binary and streams stdout directly to the provided writer.
-// For Lambda binaries using the Runtime API, the response is received via the API and written to stdout.
-func StreamRun(ctx context.Context, binary, envFile string, envVars map[string]string, workingDir string, timeoutSeconds int, payloadBytes []byte, stdout io.Writer) error {
-	// Use the regular Run function and write the result to stdout
-	response, err := Run(ctx, binary, envFile, envVars, workingDir, timeoutSeconds, payloadBytes)
-	if err != nil {
-		return err
-	}
-
-	_, err = stdout.Write(response)
-	return err
 }

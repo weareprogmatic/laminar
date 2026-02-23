@@ -86,8 +86,8 @@ func validate(services []ServiceConfig) error {
 			}
 		}
 
-		if svc.ResponseMode != "" && svc.ResponseMode != "lambda" && svc.ResponseMode != "raw" {
-			return fmt.Errorf("service %s: response_mode must be 'lambda' or 'raw', got %s", svc.Name, svc.ResponseMode)
+		if err := validateModes(svc); err != nil {
+			return err
 		}
 
 		if svc.EnvFile != "" {
@@ -101,6 +101,14 @@ func validate(services []ServiceConfig) error {
 		}
 	}
 
+	return nil
+}
+
+// validateModes checks response_mode for a single service.
+func validateModes(svc ServiceConfig) error {
+	if svc.ResponseMode != "" && svc.ResponseMode != "lambda" && svc.ResponseMode != "raw" {
+		return fmt.Errorf("service %s: response_mode must be 'lambda' or 'raw', got %s", svc.Name, svc.ResponseMode)
+	}
 	return nil
 }
 

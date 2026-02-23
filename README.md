@@ -13,7 +13,7 @@ Laminar is a high-performance Go CLI that orchestrates local AWS Lambda endpoint
 - **AWS Runtime API**: Implements the documented AWS Lambda Runtime API protocol
 - **Fork-per-Request**: Each HTTP request spawns a new Lambda execution for isolation
 - **Lambda Payload V2.0**: Automatically maps HTTP requests to AWS Lambda Payload Version 2.0 format
-- **Streaming & SSE**: Full support for Server-Sent Events and streaming responses
+- **Lambda-to-Lambda Calls**: Built-in mock Lambda Service API so one Lambda can invoke another locally using the standard AWS SDK, with zero code changes
 - **Response Modes**: Parse Lambda structured responses or stream raw output
 - **Environment Management**: Load environment variables from `.env` files per service
 - **CORS Support**: Built-in middleware for cross-origin requests matching AWS Lambda Function URL behavior
@@ -94,10 +94,10 @@ curl http://localhost:8080
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `name` | string | ✓ | | Human-readable service identifier |
+| `name` | string | ✓ | | Service identifier — also used as the **function name** for Lambda-to-Lambda routing |
 | `port` | integer | ✓ | | HTTP port (1-65535) |
 | `binary` | string | ✓ | | Path to executable |
-| `cors` | array | | `[]` | Allowed CORS origins (use `["*"]` for all) |
+| `cors` | array | | `[]` | Allowed CORS origins (use `[>"*"]` for all) |
 | `methods` | array | | `[]` | CORS-only: sets `Access-Control-Allow-Methods` header (no request filtering) |
 | `content_type` | string | | `"application/json"` | Default Content-Type header |
 | `response_mode` | string | | `"lambda"` | Response handling: `"lambda"` or `"raw"` |
@@ -125,7 +125,85 @@ Falls back to raw mode if output is not valid JSON.
 
 #### `raw`
 
-Streams binary stdout directly as HTTP response body with configured `content_type`.
+Returns the Lambda's Runtime API response body as-is, without parsing it as a structured Lambda response. Useful when the Lambda returns plain text, HTML, or non-standard JSON.
+
+### Lambda-to-Lambda Invocations
+
+Laminar automatically starts a mock **Lambda Service API** alongside your services, so one Lambda can invoke another using the standard AWS SDK — no real AWS credentials or networking required.
+
+When Laminar starts, it:
+
+1. Starts a Lambda Service API server on a random port.
+2. Injects `AWS_ENDPOINT_URL_LAMBDA` (and `AWS_LAMBDA_ENDPOINT` for older SDKs) into every Lambda process, pointing to that server.
+3. Routes invocation calls by matching the function name against the `name` field in `laminar.json`.
+
+Both invocation types are supported:
+
+| `X-Amz-Invocation-Type` | Behaviour |
+|-------------------------|-----------|
+| `RequestResponse` (default) | Runs the target Lambda synchronously and returns its output |
+| `Event` | Fires the target Lambda in a background goroutine; returns `202` immediately |
+
+**Example `laminar.json` with two services:**
+
+```json
+[
+  {
+    "name": "api-service",
+    "port": 8080,
+    "binary": "./artifacts/api-service",
+    "response_mode": "lambda"
+  },
+  {
+    "name": "worker-service",
+    "port": 8081,
+    "binary": "./artifacts/worker-service",
+    "response_mode": "lambda"
+  }
+]
+```
+
+**Example — Go Lambda calling another Lambda:**
+
+```go
+import (
+    "context"
+
+    awsconfig "github.com/aws/aws-sdk-go-v2/config"
+    lambdasdk "github.com/aws/aws-sdk-go-v2/service/lambda"
+    "github.com/aws/aws-sdk-go-v2/aws"
+)
+
+func handler(ctx context.Context, event MyEvent) (MyResponse, error) {
+    cfg, err := awsconfig.LoadDefaultConfig(ctx)
+    if err != nil {
+        return MyResponse{}, err
+    }
+    client := lambdasdk.NewFromConfig(cfg)
+
+    out, err := client.Invoke(ctx, &lambdasdk.InvokeInput{
+        FunctionName: aws.String("worker-service"), // matches "name" in laminar.json
+        Payload:      []byte(`{"task":"process"}`),
+    })
+    if err != nil {
+        return MyResponse{}, err
+    }
+
+    // out.Payload contains the raw response from worker-service
+    _ = out.Payload
+    return MyResponse{Status: "ok"}, nil
+}
+```
+
+Because `AWS_ENDPOINT_URL_LAMBDA` is already set by Laminar, the AWS SDK routes this call locally without any code changes between local and production environments.
+
+**Function name formats supported:**
+
+| Format | Example | Resolved as |
+|--------|---------|-------------|
+| Plain name | `"worker-service"` | `worker-service` |
+| Name with qualifier | `"worker-service:$LATEST"` | `worker-service` (qualifier stripped) |
+| Full ARN | `"arn:aws:lambda:us-east-1:123:function:worker-service"` | `worker-service` |
 
 ### Environment Variables
 
@@ -141,6 +219,7 @@ DATABASE_URL=postgresql://localhost/mydb
 **Automatic Variables:**
 - `LAMINAR_LOCAL=true` (always injected)
 - `AWS_REGION=us-east-1` (default if not set)
+- `AWS_ENDPOINT_URL_LAMBDA` / `AWS_LAMBDA_ENDPOINT` (points to Laminar's Lambda Service API for Lambda-to-Lambda calls)
 
 Variables from `.env` files override system environment variables.
 
@@ -244,50 +323,50 @@ Options:
 
 ## Architecture
 
+Each service runs its own HTTP server. Every request triggers a fresh Lambda process via the AWS Lambda Runtime API protocol — the same mechanism used in production.
+
 ```
-┌─────────────────────────────────────────────────────┐
-│                     Laminar                         │
-│                                                     │
-│  ┌─────────────┐  ┌─────────────┐  ┌───────────┐  │
-│  │  Service 1  │  │  Service 2  │  │ Service N │  │
-│  │  Port 8080  │  │  Port 8081  │  │ Port 8082 │  │
-│  └──────┬──────┘  └──────┬──────┘  └─────┬─────┘  │
-│         │                │                │        │
-│         └────────────────┴────────────────┘        │
-│                          │                         │
-└──────────────────────────┼─────────────────────────┘
-                           │
-                           ▼
-                  ┌─────────────────┐
-                  │  HTTP Request   │
-                  └─────────┬───────┘
-                            │
-                  ┌─────────▼──────────────┐
-   ┌──────────────┤ Mock Runtime API      │
-   │              │ (AWS Lambda Protocol) │
-   │              └─────────┬──────────────┘
-   │                        │
-   ▼                        ▼
-┌─────────────┐   ┌─────────────────┐
-│ fork binary │   │ Lambda.Start()  │
-│    setup    │   │  polls GET      │
-│AWS_LAMBDA_  │────────────┤        │
-│ RUNTIME_API │   │  receives V2.0  │
-│             │   │  JSON payload   │
-│             │   └─────────┬───────┘
-│             │             │
-├─────────────┤  handler() processes request
-│ binary      │             │
-│ /runtime/   │   ┌─────────▼───────┐
-│  invocation │   │ POST response   │
-│  response   │───────────┤  to      │
-│ (stream     │   │ Runtime API     │
-│  stdout)    │   └─────────┬───────┘
-│             │             │
-└─────────────┘   ┌─────────▼───────┐
-                  │  stream stdout  │
-                  │  to HTTP client │
-                  └─────────────────┘
+HTTP client
+    │
+    │  GET /api/users
+    ▼
+┌──────────────────────────────────────────┐
+│  Laminar (per-service HTTP server)       │
+│                                          │
+│  1. Map request → Lambda Payload V2.0   │
+│  2. Start mock Runtime API (random port) │
+│  3. Fork Lambda binary with             │
+│     AWS_LAMBDA_RUNTIME_API=127.0.0.1:X  │
+│     AWS_ENDPOINT_URL_LAMBDA=127.0.0.1:Y │
+└────────────────────┬─────────────────────┘
+                     │
+         ┌───────────┴────────────┐
+         │                        │
+         ▼                        ▼
+┌─────────────────┐    ┌──────────────────────┐
+│  Mock Runtime   │    │   Lambda binary      │
+│  API server     │    │                      │
+│                 │◄───│  lambda.Start()      │
+│  GET /runtime/  │    │  polls next event    │
+│  invocation/    │───►│                      │
+│  next           │    │  handler() runs      │
+│                 │◄───│                      │
+│  POST /runtime/ │    │  POST response back  │
+│  invocation/    │    │  to Runtime API      │
+│  {id}/response  │    │         │            │
+└────────┬────────┘    │         │ client.    │
+         │             │         │ Invoke()   │
+         ▼             └─────────┼────────────┘
+┌──────────────────┐             │
+│  Forward Lambda  │             ▼
+│  response to     │  ┌──────────────────────┐
+│  HTTP client     │  │  Mock Lambda Service │
+└──────────────────┘  │  API (port Y)        │
+                      │                      │
+                      │  Routes by "name"    │
+                      │  → forks target      │
+                      │    Lambda binary     │
+                      └──────────────────────┘
 ```
 
 ## Development
