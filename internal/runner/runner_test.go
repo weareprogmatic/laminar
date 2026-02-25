@@ -200,7 +200,7 @@ curl -s -X POST "http://${RUNTIME_API}/2018-06-01/runtime/invocation/mock-reques
 		binary := setupTestScript(t, script)
 		ctx := context.Background()
 
-		output, err := Run(ctx, binary, "", nil, "", 5, []byte("test input"))
+		output, err := Run(ctx, binary, "", nil, "", 5, 0, []byte("test input"))
 		if err != nil {
 			t.Fatalf("Run() error = %v", err)
 		}
@@ -214,7 +214,7 @@ curl -s -X POST "http://${RUNTIME_API}/2018-06-01/runtime/invocation/mock-reques
 		script := setupTestScript(t, "#!/bin/sh\nsleep 10")
 		ctx := context.Background()
 
-		_, err := Run(ctx, script, "", nil, "", 1, []byte(""))
+		_, err := Run(ctx, script, "", nil, "", 1, 0, []byte(""))
 		if err == nil {
 			t.Errorf("Run() expected timeout error, got nil")
 		}
@@ -239,7 +239,7 @@ curl -s -X POST "http://${RUNTIME_API}/2018-06-01/runtime/invocation/mock-reques
 			cancel()
 		}()
 
-		_, err := Run(ctx, binary, "", nil, "", 30, []byte(""))
+		_, err := Run(ctx, binary, "", nil, "", 30, 0, []byte(""))
 		if err == nil {
 			t.Errorf("Run() expected cancellation error, got nil")
 		}
@@ -251,7 +251,7 @@ curl -s -X POST "http://${RUNTIME_API}/2018-06-01/runtime/invocation/mock-reques
 
 	t.Run("binary not found", func(t *testing.T) {
 		ctx := context.Background()
-		_, err := Run(ctx, "/nonexistent/binary", "", nil, "", 5, []byte(""))
+		_, err := Run(ctx, "/nonexistent/binary", "", nil, "", 5, 0, []byte(""))
 		if err == nil {
 			t.Errorf("Run() expected error for nonexistent binary, got nil")
 		}

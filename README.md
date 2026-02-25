@@ -11,7 +11,7 @@ Laminar is a high-performance Go CLI that orchestrates local AWS Lambda endpoint
 
 - **Zero Lambda Code Changes**: Works with unmodified Lambda functions using `github.com/aws/aws-lambda-go`
 - **AWS Runtime API**: Implements the documented AWS Lambda Runtime API protocol
-- **Fork-per-Request**: Each HTTP request spawns a new Lambda execution for isolation
+- **Warm Process Model**: Lambda processes start at Laminar startup and stay alive between requests, mirroring real AWS Lambda warm-container behaviour
 - **Lambda Payload V2.0**: Automatically maps HTTP requests to AWS Lambda Payload Version 2.0 format
 - **Lambda-to-Lambda Calls**: Built-in mock Lambda Service API so one Lambda can invoke another locally using the standard AWS SDK, with zero code changes
 - **Response Modes**: Parse Lambda structured responses or stream raw output
@@ -103,6 +103,7 @@ curl http://localhost:8080
 | `response_mode` | string | | `"lambda"` | Response handling: `"lambda"` or `"raw"` |
 | `env_file` | string | | | Path to `.env` file for environment variables |
 | `timeout` | integer | | `30` | Execution timeout in seconds |
+| `debug_port` | integer | | | Delve debugger port — when set, wraps Lambda with `dlv exec --headless` |
 
 ### Response Modes
 
@@ -264,42 +265,93 @@ Laminar maps HTTP requests to the AWS Lambda Payload Version 2.0 format:
 }
 ```
 
-## VS Code Debugging
+## Debugging Lambda Functions
 
-Laminar's fork-per-request model enables attaching a debugger to Lambda processes.
+Laminar has built-in Delve integration for step-through debugging of Lambda functions. Add `debug_port` to a service in `laminar.json` and Laminar starts the Lambda **immediately at startup** wrapped with `dlv exec --headless --continue`. The debug port is open before the first request arrives — attach your IDE once and breakpoints fire on every subsequent request, just like a warm Lambda container.
+
+### Prerequisites
+
+Install [Delve](https://github.com/go-delve/delve):
+
+```bash
+go install github.com/go-delve/delve/cmd/dlv@latest
+```
+
+**Important:** Build your Lambda with debug symbols (no `-ldflags "-s -w"`):
+
+```bash
+go build -gcflags="all=-N -l" -o artifacts/my-lambda ./path/to/lambda
+```
 
 ### Setup
 
-1. Add to `.vscode/launch.json`:
+1. **Add `debug_port` to your service config:**
+
+```json
+[
+  {
+    "name": "my-service",
+    "port": 8080,
+    "binary": "./artifacts/my-lambda",
+    "debug_port": 2345
+  }
+]
+```
+
+When `debug_port` is set, the process timeout is automatically raised to at least **300 seconds**.
+
+2. **Add a VS Code launch configuration** (`.vscode/launch.json`):
 
 ```json
 {
-  "name": "Attach to Lambda Process",
-  "type": "go",
-  "request": "attach",
-  "mode": "local",
-  "processId": "${command:pickProcess}"
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Attach to Lambda",
+      "type": "go",
+      "request": "attach",
+      "mode": "remote",
+      "port": 2345,
+      "host": "127.0.0.1",
+      "substitutePath": [
+        { "from": "${workspaceFolder}", "to": "${workspaceFolder}" }
+      ]
+    }
+  ]
 }
 ```
 
-2. Start Laminar:
+> Requires [Go extension](https://marketplace.visualstudio.com/items?itemName=golang.Go) v0.40.0+ and `dlv` v1.7.3+.
+
+3. **Start Laminar:**
 
 ```bash
 laminar
 ```
 
-3. In VS Code:
-   - Set a breakpoint in your Lambda source code
-   - Run **"Attach to Lambda Process"** configuration
-   - Select your binary from the process list (or wait for next request)
+As soon as the service starts, Laminar logs:
 
-4. Trigger the endpoint:
-
-```bash
-curl http://localhost:8080
+```
+[Lambda] Debugger ready on 127.0.0.1:2345 – attach your IDE now
 ```
 
-The debugger will attach when the process spawns, hitting your breakpoint.
+The Lambda process is loaded and paused at the entry point, waiting for your IDE.
+
+4. **Press F5 in VS Code** (Run → "Attach to Lambda"). dlv connects and resumes the Lambda. It calls `GET /runtime/invocation/next` and blocks, ready for requests.
+
+5. **Send requests normally:**
+
+```bash
+curl http://localhost:8080/test
+```
+
+Your breakpoints are hit on every request. The debug session stays alive between requests — no need to re-attach.
+
+> **Note:** When `debug_port` is set, the Lambda process is paused until you attach your IDE. HTTP requests will block until you connect and resume.
+
+### Lambda-to-Lambda Debugging
+
+If a target service has `debug_port` set and another Lambda invokes it via `client.Invoke()`, the invoked Lambda is also started warm with dlv on that port.
 
 ## Health Checks
 
@@ -323,7 +375,7 @@ Options:
 
 ## Architecture
 
-Each service runs its own HTTP server. Every request triggers a fresh Lambda process via the AWS Lambda Runtime API protocol — the same mechanism used in production.
+Each service starts a **persistent Lambda process** when Laminar starts, mirroring the warm-container model of real AWS Lambda. Requests are fed to the running process via the AWS Lambda Runtime API protocol — the process calls `GET /runtime/invocation/next` between requests, exactly as it would in production.
 
 ```
 HTTP client

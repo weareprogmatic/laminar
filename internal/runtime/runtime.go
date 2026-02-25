@@ -17,36 +17,42 @@ import (
 	"time"
 )
 
-// Server implements the AWS Lambda Runtime API.
+type invocationReq struct {
+	payload []byte
+	respCh  chan invocationResp
+}
+
+type invocationResp struct {
+	body []byte
+	err  error
+}
+
+// Server implements the AWS Lambda Runtime API, supporting multiple sequential invocations.
+// The Lambda process stays alive between requests, calling GET /next each time.
 type Server struct {
-	listener net.Listener
-	server   *http.Server
-	port     int
-	payload  []byte
-	response []byte
-	err      error
-	done     chan struct{}
-	served   bool // Track if we've already served one invocation
-	mu       sync.Mutex
+	listener      net.Listener
+	server        *http.Server
+	port          int
+	invokeCh      chan invocationReq
+	closeCh       chan struct{}
+	closeOnce     sync.Once
+	mu            sync.Mutex
+	currentRespCh chan invocationResp
 }
 
 // NewServer creates a new Lambda Runtime API server on a random port.
-func NewServer(payload []byte) (*Server, error) {
+func NewServer() (*Server, error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0") //nolint:noctx
 	if err != nil {
 		return nil, fmt.Errorf("failed to create listener: %w", err)
 	}
 
-	port := listener.Addr().(*net.TCPAddr).Port
-
-	s := &Server{
+	return &Server{
 		listener: listener,
-		port:     port,
-		payload:  payload,
-		done:     make(chan struct{}),
-	}
-
-	return s, nil
+		port:     listener.Addr().(*net.TCPAddr).Port,
+		invokeCh: make(chan invocationReq),
+		closeCh:  make(chan struct{}),
+	}, nil
 }
 
 // Port returns the port the runtime API server is listening on.
@@ -57,12 +63,7 @@ func (s *Server) Port() int {
 // Start starts the runtime API server in the background.
 func (s *Server) Start() {
 	mux := http.NewServeMux()
-
-	// GET /2018-06-01/runtime/invocation/next
 	mux.HandleFunc("/2018-06-01/runtime/invocation/next", s.handleInvocationNext)
-
-	// POST /2018-06-01/runtime/invocation/{requestId}/response
-	// POST /2018-06-01/runtime/invocation/{requestId}/error
 	mux.HandleFunc("/2018-06-01/runtime/invocation/", s.handleInvocationResponse)
 
 	s.server = &http.Server{
@@ -77,35 +78,55 @@ func (s *Server) Start() {
 	}()
 }
 
-// handleInvocationNext returns the next invocation (our payload).
-// After first invocation is consumed, subsequent requests will hang until we get a response.
+// Invoke sends payload to the Lambda and blocks until the Lambda posts a response.
+// The Lambda process stays alive between calls; it calls GET /next each invocation.
+func (s *Server) Invoke(ctx context.Context, payload []byte) ([]byte, error) {
+	respCh := make(chan invocationResp, 1)
+	select {
+	case s.invokeCh <- invocationReq{payload: payload, respCh: respCh}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.closeCh:
+		return nil, fmt.Errorf("runtime server closed")
+	}
+	select {
+	case resp := <-respCh:
+		return resp.body, resp.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.closeCh:
+		return nil, fmt.Errorf("runtime server closed")
+	}
+}
+
+// handleInvocationNext blocks until Invoke enqueues a payload, then streams it to the Lambda.
 func (s *Server) handleInvocationNext(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	s.mu.Lock()
-	if s.served {
-		// Lambda is polling for next invocation after finishing the first one
-		// We want single-shot behavior, so just block until done
-		s.mu.Unlock()
-		<-s.done // Block until we're done
+	var req invocationReq
+	select {
+	case req = <-s.invokeCh:
+	case <-s.closeCh:
 		http.Error(w, "No more invocations", http.StatusGone)
 		return
+	case <-r.Context().Done():
+		return
 	}
-	s.served = true
+
+	s.mu.Lock()
+	s.currentRespCh = req.respCh
 	s.mu.Unlock()
 
-	// Set required headers
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Lambda-Runtime-Aws-Request-Id", "mock-request-id")
 	w.Header().Set("Lambda-Runtime-Deadline-Ms", "9999999999999")
 	w.Header().Set("Lambda-Runtime-Invoked-Function-Arn", "arn:aws:lambda:us-east-1:000000000000:function:test")
 	w.Header().Set("Lambda-Runtime-Trace-Id", "Root=mock-trace-id")
-
 	w.WriteHeader(http.StatusOK)
-	bytesWritten, _ := w.Write(s.payload)
+	bytesWritten, _ := w.Write(req.payload)
 	log.Printf("[Runtime API] Sent %d bytes payload", bytesWritten)
 }
 
@@ -118,14 +139,11 @@ func (s *Server) handleInvocationResponse(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Check if this is an error endpoint (ends with "/error")
-	urlPath := r.URL.Path
-	if len(urlPath) >= 6 && urlPath[len(urlPath)-6:] == "/error" {
+	if len(r.URL.Path) >= 6 && r.URL.Path[len(r.URL.Path)-6:] == "/error" {
 		s.handleInvocationError(w, r)
 		return
 	}
 
-	// Read the full response body
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Failed to read response", http.StatusInternalServerError)
@@ -135,11 +153,13 @@ func (s *Server) handleInvocationResponse(w http.ResponseWriter, r *http.Request
 	log.Printf("[Runtime API] Received %d bytes: %s", len(bodyBytes), string(bodyBytes))
 
 	s.mu.Lock()
-	s.response = bodyBytes
+	respCh := s.currentRespCh
 	s.mu.Unlock()
 
+	if respCh != nil {
+		respCh <- invocationResp{body: bodyBytes}
+	}
 	w.WriteHeader(http.StatusAccepted)
-	s.signal()
 }
 
 // handleInvocationError processes Lambda error responses.
@@ -155,34 +175,20 @@ func (s *Server) handleInvocationError(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid error payload", http.StatusBadRequest)
 		return
 	}
+
 	s.mu.Lock()
-	s.err = fmt.Errorf("lambda error: %v", errorPayload)
+	respCh := s.currentRespCh
 	s.mu.Unlock()
 
-	w.WriteHeader(http.StatusAccepted)
-	s.signal()
-}
-
-// signal closes the done channel once.
-func (s *Server) signal() {
-	select {
-	case <-s.done:
-	default:
-		close(s.done)
-		log.Printf("[Runtime API] Signaled done")
+	if respCh != nil {
+		respCh <- invocationResp{err: fmt.Errorf("lambda error: %v", errorPayload)}
 	}
-}
-
-// Wait blocks until the Lambda sends a buffered response or the channel is closed.
-func (s *Server) Wait() ([]byte, error) {
-	<-s.done
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.response, s.err
+	w.WriteHeader(http.StatusAccepted)
 }
 
 // Close gracefully shuts down the server.
 func (s *Server) Close() error {
+	s.closeOnce.Do(func() { close(s.closeCh) })
 	if s.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()

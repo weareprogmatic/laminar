@@ -20,6 +20,7 @@ import (
 type Server struct {
 	config config.ServiceConfig
 	server *http.Server
+	warm   *runner.WarmLambda // nil only in unit tests that call New() directly
 }
 
 // New creates a new Server instance.
@@ -27,13 +28,58 @@ func New(cfg config.ServiceConfig) *Server {
 	return &Server{config: cfg}
 }
 
+// invokeLambda runs the Lambda with the given payload. Uses the warm process if available,
+// otherwise falls back to a per-request runner.Run (used in tests via New() directly).
+func (s *Server) invokeLambda(ctx context.Context, payload []byte) ([]byte, error) {
+	if s.warm != nil {
+		return s.warm.Invoke(ctx, payload)
+	}
+	return runner.Run(ctx, s.config.Binary, s.config.EnvFile, s.config.Env, s.config.WorkingDir, s.config.Timeout, s.config.DebugPort, payload)
+}
+
+// listenWithRetry tries to bind the TCP port up to maxAttempts times, waiting
+// between each attempt. This handles the brief window where the OS hasn't yet
+// released the port from a previous laminar process.
+func listenWithRetry(ctx context.Context, port int) (net.Listener, error) {
+	const maxAttempts = 20
+	const retryDelay = 500 * time.Millisecond
+	addr := fmt.Sprintf(":%d", port)
+	for i := range maxAttempts {
+		l, err := (&net.ListenConfig{}).Listen(ctx, "tcp", addr)
+		if err == nil {
+			return l, nil
+		}
+		if i < maxAttempts-1 {
+			log.Printf("Port %d busy (attempt %d/%d), retrying in %s…", port, i+1, maxAttempts, retryDelay)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(retryDelay):
+			}
+		}
+	}
+	return nil, fmt.Errorf("port %d still in use after %d attempts", port, maxAttempts)
+}
+
 // Start starts the HTTP server and blocks until context is cancelled.
 func Start(ctx context.Context, cfg config.ServiceConfig) error {
 	srv := New(cfg)
+
+	warm, err := runner.StartWarm(ctx, cfg.Binary, cfg.EnvFile, cfg.Env, cfg.WorkingDir, cfg.DebugPort, *cfg.Watch)
+	if err != nil {
+		return fmt.Errorf("failed to start lambda process: %w", err)
+	}
+	srv.warm = warm
+	defer warm.Close()
+
 	handler := srv.buildHandler()
 
+	listener, err := listenWithRetry(ctx, cfg.Port)
+	if err != nil {
+		return fmt.Errorf("failed to bind port for %s: %w", cfg.Name, err)
+	}
+
 	srv.server = &http.Server{
-		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           handler,
 		ReadTimeout:       30 * time.Second,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -54,7 +100,7 @@ func Start(ctx context.Context, cfg config.ServiceConfig) error {
 	}()
 
 	log.Printf("Starting %s on :%d -> %s", cfg.Name, cfg.Port, cfg.Binary)
-	if err := srv.server.ListenAndServe(); err != http.ErrServerClosed {
+	if err := srv.server.Serve(listener); err != http.ErrServerClosed {
 		return fmt.Errorf("server error for %s: %w", cfg.Name, err)
 	}
 
@@ -104,7 +150,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	output, err := runner.Run(ctx, s.config.Binary, s.config.EnvFile, s.config.Env, s.config.WorkingDir, s.config.Timeout, payloadBytes)
+	output, err := s.invokeLambda(ctx, payloadBytes)
 	if err != nil {
 		log.Printf("[%s] Error executing binary: %v", s.config.Name, err)
 		http.Error(w, fmt.Sprintf("Error executing binary: %v", err), http.StatusInternalServerError)

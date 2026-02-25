@@ -150,7 +150,7 @@ func (s *Server) invokeAsync(svc config.ServiceConfig, payload []byte) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(svc.Timeout)*time.Second)
 		defer cancel()
-		if _, err := runner.Run(ctx, svc.Binary, svc.EnvFile, svc.Env, svc.WorkingDir, svc.Timeout, payload); err != nil {
+		if _, err := runner.Run(ctx, svc.Binary, svc.EnvFile, svc.Env, svc.WorkingDir, svc.Timeout, svc.DebugPort, payload); err != nil {
 			log.Printf("[Lambda API] Async invocation of %q failed: %v", svc.Name, err)
 		}
 	}()
@@ -158,7 +158,7 @@ func (s *Server) invokeAsync(svc config.ServiceConfig, payload []byte) {
 
 // invokeSync runs the Lambda, waits for its response, and writes the raw output back.
 func (s *Server) invokeSync(w http.ResponseWriter, ctx context.Context, svc config.ServiceConfig, payload []byte) {
-	output, err := runner.Run(ctx, svc.Binary, svc.EnvFile, svc.Env, svc.WorkingDir, svc.Timeout, payload)
+	output, err := runner.Run(ctx, svc.Binary, svc.EnvFile, svc.Env, svc.WorkingDir, svc.Timeout, svc.DebugPort, payload)
 	if err != nil {
 		log.Printf("[Lambda API] Sync invocation of %q failed: %v", svc.Name, err)
 		errBody, _ := json.Marshal(map[string]string{

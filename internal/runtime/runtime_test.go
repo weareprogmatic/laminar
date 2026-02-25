@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,8 +11,7 @@ import (
 )
 
 func TestNewServer(t *testing.T) {
-	payload := []byte(`{"test": "data"}`)
-	srv, err := NewServer(payload)
+	srv, err := NewServer()
 	if err != nil {
 		t.Fatalf("NewServer() error = %v, want nil", err)
 	}
@@ -20,14 +20,10 @@ func TestNewServer(t *testing.T) {
 	if srv.port == 0 {
 		t.Errorf("port = 0, want non-zero")
 	}
-	if bytes.Equal(srv.payload, payload) == false {
-		t.Errorf("payload mismatch")
-	}
 }
 
 func TestPort(t *testing.T) {
-	payload := []byte(`{"test": "data"}`)
-	srv, err := NewServer(payload)
+	srv, err := NewServer()
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}
@@ -42,21 +38,36 @@ func TestPort(t *testing.T) {
 	}
 }
 
-func TestStartAndWait(t *testing.T) {
-	payload := []byte(`{"test": "invocation"}`)
-	srv, err := NewServer(payload)
+func TestInvoke(t *testing.T) {
+	srv, err := NewServer()
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}
 	defer srv.Close()
-
 	srv.Start()
-	time.Sleep(100 * time.Millisecond) // Give server time to start
+	time.Sleep(100 * time.Millisecond)
 
-	// Test handleInvocationNext - GET /2018-06-01/runtime/invocation/next
+	payload := []byte(`{"test": "invocation"}`)
+	responseBody := []byte(`{"statusCode": 200, "body": "test"}`)
+
+	// Call Invoke in background (simulates the external HTTP caller)
+	type invResult struct {
+		data []byte
+		err  error
+	}
+	resultCh := make(chan invResult, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		data, err := srv.Invoke(ctx, payload)
+		resultCh <- invResult{data, err}
+	}()
+
 	client := &http.Client{Timeout: 5 * time.Second}
-	url := fmt.Sprintf("http://127.0.0.1:%d/2018-06-01/runtime/invocation/next", srv.port)
-	resp, err := client.Get(url)
+	nextURL := fmt.Sprintf("http://127.0.0.1:%d/2018-06-01/runtime/invocation/next", srv.port)
+
+	// Simulate Lambda: GET /next
+	resp, err := client.Get(nextURL)
 	if err != nil {
 		t.Fatalf("Failed to GET invocation/next: %v", err)
 	}
@@ -65,15 +76,12 @@ func TestStartAndWait(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("GET status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
-
-	// Check response headers
 	if resp.Header.Get("Lambda-Runtime-Aws-Request-Id") != "mock-request-id" {
 		t.Errorf("Missing or incorrect Lambda-Runtime-Aws-Request-Id header")
 	}
 
-	// Test handleInvocationResponse - POST /2018-06-01/runtime/invocation/{requestId}/response
-	responseBody := []byte(`{"statusCode": 200, "body": "test"}`)
-	resp, err = client.Post(
+	// Simulate Lambda: POST /response
+	postResp, err := client.Post(
 		fmt.Sprintf("http://127.0.0.1:%d/2018-06-01/runtime/invocation/mock-request-id/response", srv.port),
 		"application/json",
 		bytes.NewReader(responseBody),
@@ -81,30 +89,28 @@ func TestStartAndWait(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to POST response: %v", err)
 	}
-	defer resp.Body.Close()
+	defer postResp.Body.Close()
 
-	if resp.StatusCode != http.StatusAccepted {
-		t.Errorf("POST status = %d, want %d", resp.StatusCode, http.StatusAccepted)
+	if postResp.StatusCode != http.StatusAccepted {
+		t.Errorf("POST status = %d, want %d", postResp.StatusCode, http.StatusAccepted)
 	}
 
-	// Test Wait() - should get the response we posted
-	result, err := srv.Wait()
-	if err != nil {
-		t.Errorf("Wait() error = %v, want nil", err)
+	// Invoke should return the response body
+	r := <-resultCh
+	if r.err != nil {
+		t.Errorf("Invoke() error = %v, want nil", r.err)
 	}
-	if !bytes.Equal(result, responseBody) {
-		t.Errorf("Wait() = %s, want %s", string(result), string(responseBody))
+	if !bytes.Equal(r.data, responseBody) {
+		t.Errorf("Invoke() = %s, want %s", string(r.data), string(responseBody))
 	}
 }
 
 func TestHandleInvocationNextMethodValidation(t *testing.T) {
-	payload := []byte(`{"test": "data"}`)
-	srv, err := NewServer(payload)
+	srv, err := NewServer()
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}
 	defer srv.Close()
-
 	srv.Start()
 	time.Sleep(100 * time.Millisecond)
 
@@ -125,17 +131,36 @@ func TestHandleInvocationNextMethodValidation(t *testing.T) {
 }
 
 func TestHandleInvocationResponseError(t *testing.T) {
-	payload := []byte(`{"test": "data"}`)
-	srv, err := NewServer(payload)
+	srv, err := NewServer()
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}
 	defer srv.Close()
-
 	srv.Start()
 	time.Sleep(100 * time.Millisecond)
 
 	client := &http.Client{Timeout: 5 * time.Second}
+
+	// Start Invoke in background so /next is consumed and currentRespCh is set
+	type invResult struct {
+		data []byte
+		err  error
+	}
+	resultCh := make(chan invResult, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		data, err := srv.Invoke(ctx, []byte(`{}`))
+		resultCh <- invResult{data, err}
+	}()
+
+	// Simulate Lambda: GET /next to set up currentRespCh
+	nextURL := fmt.Sprintf("http://127.0.0.1:%d/2018-06-01/runtime/invocation/next", srv.port)
+	nextResp, err := client.Get(nextURL)
+	if err != nil {
+		t.Fatalf("Failed to GET /next: %v", err)
+	}
+	_ = nextResp.Body.Close()
 
 	// POST error payload
 	errorPayload := map[string]interface{}{
@@ -157,21 +182,19 @@ func TestHandleInvocationResponseError(t *testing.T) {
 		t.Errorf("POST error status = %d, want %d", resp.StatusCode, http.StatusAccepted)
 	}
 
-	// Wait should return the error
-	_, err = srv.Wait()
-	if err == nil {
-		t.Errorf("Wait() error = nil, want non-nil")
+	// Invoke should return an error
+	r := <-resultCh
+	if r.err == nil {
+		t.Errorf("Invoke() error = nil, want non-nil")
 	}
 }
 
 func TestHandleInvocationResponseMethodValidation(t *testing.T) {
-	payload := []byte(`{"test": "data"}`)
-	srv, err := NewServer(payload)
+	srv, err := NewServer()
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}
 	defer srv.Close()
-
 	srv.Start()
 	time.Sleep(100 * time.Millisecond)
 
@@ -191,12 +214,10 @@ func TestHandleInvocationResponseMethodValidation(t *testing.T) {
 }
 
 func TestClose(t *testing.T) {
-	payload := []byte(`{"test": "data"}`)
-	srv, err := NewServer(payload)
+	srv, err := NewServer()
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}
-
 	srv.Start()
 	time.Sleep(100 * time.Millisecond)
 
@@ -206,7 +227,7 @@ func TestClose(t *testing.T) {
 		t.Logf("Close() may have error due to already-closed listener: %v", err)
 	}
 
-	// Server should be closed, wait a bit for graceful shutdown
+	// Server should be closed
 	time.Sleep(100 * time.Millisecond)
 	client := &http.Client{Timeout: 1 * time.Second}
 	_, err = client.Get(fmt.Sprintf("http://127.0.0.1:%d/health", srv.port))

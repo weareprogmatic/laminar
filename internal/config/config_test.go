@@ -151,6 +151,38 @@ func TestLoad(t *testing.T) {
 			}]`,
 			wantErr: false,
 		},
+		{
+			name: "debug_port out of range",
+			content: `[{
+				"name": "test",
+				"port": 8080,
+				"binary": "./testdata/test-binary",
+				"debug_port": 99999
+			}]`,
+			wantErr: true,
+			errMsg:  "debug_port 99999 is out of range",
+		},
+		{
+			name: "debug_port same as service port",
+			content: `[{
+				"name": "test",
+				"port": 8080,
+				"binary": "./testdata/test-binary",
+				"debug_port": 8080
+			}]`,
+			wantErr: true,
+			errMsg:  "debug_port 8080 cannot be the same as service port",
+		},
+		{
+			name: "valid debug_port",
+			content: `[{
+				"name": "test",
+				"port": 8080,
+				"binary": "./testdata/test-binary",
+				"debug_port": 2345
+			}]`,
+			wantErr: false,
+		},
 	}
 
 	setupTestBinary := func(t *testing.T) {

@@ -24,6 +24,8 @@ type ServiceConfig struct {
 	WorkingDir       string            `json:"working_dir,omitempty"`
 	ResponseMode     string            `json:"response_mode,omitempty"`
 	Timeout          int               `json:"timeout,omitempty"`
+	DebugPort        int               `json:"debug_port,omitempty"`
+	Watch            *bool             `json:"watch,omitempty"`
 	IgnorePaths      []string          `json:"ignore_paths,omitempty"`
 }
 
@@ -99,8 +101,26 @@ func validate(services []ServiceConfig) error {
 		if svc.MaxAge < 0 || svc.MaxAge > 86400 {
 			return fmt.Errorf("service %s: max_age must be between 0 and 86400 seconds, got %d", svc.Name, svc.MaxAge)
 		}
+
+		if err := validateDebugPort(svc); err != nil {
+			return err
+		}
 	}
 
+	return nil
+}
+
+// validateDebugPort checks that debug_port is valid and doesn't conflict with the service port.
+func validateDebugPort(svc ServiceConfig) error {
+	if svc.DebugPort == 0 {
+		return nil
+	}
+	if svc.DebugPort < 1 || svc.DebugPort > 65535 {
+		return fmt.Errorf("service %s: debug_port %d is out of range (1-65535)", svc.Name, svc.DebugPort)
+	}
+	if svc.DebugPort == svc.Port {
+		return fmt.Errorf("service %s: debug_port %d cannot be the same as service port", svc.Name, svc.DebugPort)
+	}
 	return nil
 }
 
@@ -132,6 +152,12 @@ func applyDefaults(svc *ServiceConfig) {
 
 	for i := range svc.Methods {
 		svc.Methods[i] = strings.ToUpper(svc.Methods[i])
+	}
+
+	// Watch defaults to true.
+	if svc.Watch == nil {
+		v := true
+		svc.Watch = &v
 	}
 }
 

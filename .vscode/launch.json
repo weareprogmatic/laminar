@@ -9,10 +9,12 @@
             "program": "${workspaceFolder}/cmd/laminar",
             "args": [
                 "-config",
-                "${workspaceFolder}/laminar.json",
+                //"${workspaceFolder}/laminar.json",
+                "/Users/raul.rita/weareprogmatic/HiPitch_AI_Roleplay/laminar.json",
                 "-verbose"
             ],
-            "cwd": "${workspaceFolder}",
+            //"cwd": "${workspaceFolder}",
+            "cwd": "/Users/raul.rita/weareprogmatic/HiPitch_AI_Roleplay",
             "env": {},
             "buildFlags": ""
         }
