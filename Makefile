@@ -3,7 +3,12 @@
 # Version information
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || \
+        powershell -NoProfile -Command "(Get-Date -AsUTC).ToString('yyyy-MM-ddTHH:mm:ssZ')" 2>/dev/null || \
+        echo "unknown")
+
+# Binary extension — empty on Linux/macOS, .exe on Windows
+GOEXE := $(shell go env GOEXE)
 
 # Build flags
 LDFLAGS := -X github.com/weareprogmatic/laminar/internal/version.Version=$(VERSION) \
@@ -17,17 +22,17 @@ all: fmt lint test build
 build:
 	@echo "Building laminar $(VERSION)..."
 	@mkdir -p artifacts
-	go build -ldflags "$(LDFLAGS)" -o artifacts/laminar ./cmd/laminar
+	go build -ldflags "$(LDFLAGS)" -o artifacts/laminar$(GOEXE) ./cmd/laminar
 	@echo "Building example hello binary..."
-	cd examples/hello && go build -o ../../artifacts/hello .
-	@echo "Build complete: artifacts/laminar, artifacts/hello"
+	cd examples/hello && go build -o ../../artifacts/hello$(GOEXE) .
+	@echo "Build complete: artifacts/laminar$(GOEXE), artifacts/hello$(GOEXE)"
 
 # Build only the hello Lambda example
 build-lambda:
 	@echo "Building hello Lambda..."
 	@mkdir -p artifacts
-	cd examples/hello && go build -o ../../artifacts/hello .
-	@echo "Build complete: artifacts/hello"
+	cd examples/hello && go build -o ../../artifacts/hello$(GOEXE) .
+	@echo "Build complete: artifacts/hello$(GOEXE)"
 
 # Run tests
 test:
@@ -51,19 +56,19 @@ coverage:
 # Run linter
 lint:
 	@echo "Running linter..."
-	@which golangci-lint > /dev/null || (echo "golangci-lint not found. Install from https://golangci-lint.run/usage/install/" && exit 1)
+	@command -v golangci-lint > /dev/null 2>&1 || (echo "golangci-lint not found. Install from https://golangci-lint.run/usage/install/" && exit 1)
 	golangci-lint run
 
 # Format code
 fmt:
 	@echo "Formatting code..."
 	go fmt ./...
-	@which goimports > /dev/null && goimports -w . || echo "goimports not found, skipping (install with: go install golang.org/x/tools/cmd/goimports@latest)"
+	@command -v goimports > /dev/null 2>&1 && goimports -w . || echo "goimports not found, skipping (install with: go install golang.org/x/tools/cmd/goimports@latest)"
 
 # Clean build artifacts
 clean:
 	@echo "Cleaning..."
-	rm -rf artifacts/
+	rm -rf artifacts/ 2>/dev/null || (if exist artifacts rd /s /q artifacts)
 	go clean
 
 # Install to GOPATH/bin
@@ -75,13 +80,13 @@ install:
 loc:
 	@echo "Lines of code:"
 	@cloc --exclude-dir=artifacts,vendor,examples . 2>/dev/null || \
-		echo "cloc not found - install with: brew install cloc"
+		echo "cloc not found - install with: brew install cloc / apt install cloc / choco install cloc"
 
 # Count lines of code excluding tests
 loc-no-tests:
 	@echo "Lines of code (excluding tests):"
 	@cloc --exclude-dir=artifacts,vendor,examples --not-match-f='_test\.go$$' . 2>/dev/null || \
-		echo "cloc not found - install with: brew install cloc"
+		echo "cloc not found - install with: brew install cloc / apt install cloc / choco install cloc"
 
 # Show help
 help:

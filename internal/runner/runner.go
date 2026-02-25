@@ -88,18 +88,6 @@ func waitForDebugPort(ctx context.Context, addr string, processDone <-chan struc
 	}
 }
 
-// killDebuggerOnPort kills any existing dlv process listening on the given port.
-// This prevents "address already in use" errors when laminar is restarted while
-// a previous dlv instance is still running.
-func killDebuggerOnPort(port int) {
-	addr := "127.0.0.1:" + strconv.Itoa(port)
-	// pkill -f matches the full command line; -9 ensures the process is gone immediately.
-	cmd := exec.Command("pkill", "-9", "-f", "dlv.*--listen="+addr) //nolint:gosec,noctx // port is from config
-	_ = cmd.Run()                                                   // ignore error — no process is fine
-	// Give the OS a moment to release the port after the kill.
-	time.Sleep(100 * time.Millisecond)
-}
-
 // startProcess creates and starts the Lambda binary (optionally wrapped with dlv).
 func startProcess(ctx context.Context, binary, workingDir string, env []string, debugPort int) (*exec.Cmd, error) {
 	logWriter := &filteredWriter{serviceName: "lambda"}
@@ -121,6 +109,7 @@ func startProcess(ctx context.Context, binary, workingDir string, env []string, 
 	if workingDir != "" {
 		cmd.Dir = workingDir
 	}
+	setProcAttrs(cmd)
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start binary %s: %w", binary, err)
 	}
@@ -139,7 +128,7 @@ func awaitDebugPort(ctx context.Context, cmd *exec.Cmd, srv *runtime.Server, can
 	addr := "127.0.0.1:" + strconv.Itoa(debugPort)
 	err := waitForDebugPort(ctx, addr, processDone)
 	if err != nil {
-		_ = cmd.Process.Kill()
+		_ = killProcess(cmd)
 		// Only wait if processDone is nil (no external goroutine is waiting on the process).
 		// If processDone is non-nil, the caller's goroutine handles cmd.Wait().
 		if processDone == nil {

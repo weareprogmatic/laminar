@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 )
 
@@ -43,6 +44,10 @@ func Load(path string) ([]ServiceConfig, error) {
 
 	if len(services) == 0 {
 		return nil, fmt.Errorf("no services defined in %s", path)
+	}
+
+	for i := range services {
+		normalizePlatformPaths(&services[i])
 	}
 
 	if err := validate(services); err != nil {
@@ -167,4 +172,20 @@ func isValidHTTPMethod(method string) bool {
 		"PATCH": true, "HEAD": true, "OPTIONS": true, "TRACE": true, "CONNECT": true,
 	}
 	return validMethods[method]
+}
+
+// normalizePlatformPaths adjusts file paths for the current OS.
+// On Windows, binary paths that omit the .exe extension are resolved
+// automatically so users don't need platform-specific laminar.json files.
+func normalizePlatformPaths(svc *ServiceConfig) {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	if svc.Binary != "" && !strings.HasSuffix(svc.Binary, ".exe") {
+		// Prefer the path as-is if it already exists (e.g. cross-compiled binary
+		// deliberately named without .exe). Fall back to .exe otherwise.
+		if _, err := os.Stat(svc.Binary); os.IsNotExist(err) {
+			svc.Binary += ".exe"
+		}
+	}
 }
