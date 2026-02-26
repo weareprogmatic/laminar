@@ -21,41 +21,95 @@ type ServiceConfig struct {
 	AllowCredentials bool              `json:"allow_credentials,omitempty"`
 	EnvFile          string            `json:"env_file,omitempty"`
 	Env              map[string]string `json:"env,omitempty"`
+	Secrets          map[string]string `json:"secrets,omitempty"`
 	WorkingDir       string            `json:"working_dir,omitempty"`
 	ResponseMode     string            `json:"response_mode,omitempty"`
 	Timeout          int               `json:"timeout,omitempty"`
 	DebugPort        int               `json:"debug_port,omitempty"`
 }
 
+// Config holds the complete Laminar configuration.
+// Supports the new object format {"services":[...],"secrets":{...}}
+// as well as the legacy array format [{...}] for backward compatibility.
+// Global secrets are preferred; per-service secrets (legacy) are merged in
+// as a fallback and are overridden by any matching key in the global map.
+type Config struct {
+	Services []ServiceConfig   `json:"services"`
+	Secrets  map[string]string `json:"secrets,omitempty"`
+}
+
 // Load reads and validates a Laminar configuration file.
-func Load(path string) ([]ServiceConfig, error) {
+// It accepts both the legacy array format ([{...}]) and the new object
+// format ({"services":[...],"secrets":{...}}).
+func Load(path string) (Config, error) {
 	data, err := os.ReadFile(path) //nolint:gosec
 	if err != nil {
-		return nil, fmt.Errorf("failed to read config file %s: %w", path, err)
+		return Config{}, fmt.Errorf("failed to read config file %s: %w", path, err)
 	}
 
-	var services []ServiceConfig
-	if err := json.Unmarshal(data, &services); err != nil {
-		return nil, fmt.Errorf("failed to parse config file %s: %w", path, err)
+	cfg, err := parseConfig(data)
+	if err != nil {
+		return Config{}, fmt.Errorf("failed to parse config file %s: %w", path, err)
 	}
 
-	if len(services) == 0 {
-		return nil, fmt.Errorf("no services defined in %s", path)
+	if len(cfg.Services) == 0 {
+		return Config{}, fmt.Errorf("no services defined in %s", path)
 	}
 
-	for i := range services {
-		normalizePlatformPaths(&services[i])
+	for i := range cfg.Services {
+		normalizePlatformPaths(&cfg.Services[i])
 	}
 
-	if err := validate(services); err != nil {
-		return nil, fmt.Errorf("invalid configuration: %w", err)
+	if err := validate(cfg.Services); err != nil {
+		return Config{}, fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	for i := range services {
-		applyDefaults(&services[i])
+	for i := range cfg.Services {
+		applyDefaults(&cfg.Services[i])
 	}
 
-	return services, nil
+	return cfg, nil
+}
+
+// parseConfig detects whether data is a JSON array (legacy) or object (new format).
+func parseConfig(data []byte) (Config, error) {
+	for _, b := range data {
+		if b == ' ' || b == '\t' || b == '\n' || b == '\r' {
+			continue
+		}
+		if b == '[' {
+			// Legacy array format: per-service secrets are merged into global.
+			var services []ServiceConfig
+			if err := json.Unmarshal(data, &services); err != nil {
+				return Config{}, err
+			}
+			return Config{Services: services, Secrets: mergeServiceSecrets(services)}, nil
+		}
+		break
+	}
+	// New object format: global secrets take precedence over per-service secrets.
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return Config{}, err
+	}
+	// Merge per-service secrets first, then overlay global secrets on top.
+	merged := mergeServiceSecrets(cfg.Services)
+	for k, v := range cfg.Secrets {
+		merged[k] = v
+	}
+	cfg.Secrets = merged
+	return cfg, nil
+}
+
+// mergeServiceSecrets collects all per-service secrets into one map (last write wins).
+func mergeServiceSecrets(services []ServiceConfig) map[string]string {
+	m := make(map[string]string)
+	for _, svc := range services {
+		for k, v := range svc.Secrets {
+			m[k] = v
+		}
+	}
+	return m
 }
 
 func validate(services []ServiceConfig) error {

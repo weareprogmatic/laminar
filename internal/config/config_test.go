@@ -209,7 +209,7 @@ func TestLoad(t *testing.T) {
 				t.Fatalf("Failed to write temp config: %v", err)
 			}
 
-			services, err := Load(tmpFile)
+			cfg, err := Load(tmpFile)
 
 			if tt.wantErr {
 				if err == nil {
@@ -221,12 +221,67 @@ func TestLoad(t *testing.T) {
 				if err != nil {
 					t.Errorf("Load() unexpected error = %v", err)
 				}
-				if len(services) == 0 {
+				if len(cfg.Services) == 0 {
 					t.Errorf("Load() returned empty services")
 				}
 			}
 		})
 	}
+}
+
+func TestLoadGlobalSecrets(t *testing.T) {
+	testDataDir := "testdata"
+	os.MkdirAll(testDataDir, 0755)                                                     //nolint:errcheck
+	os.WriteFile(filepath.Join(testDataDir, "test-binary"), []byte("#!/bin/sh"), 0755) //nolint:errcheck
+	t.Cleanup(func() { os.RemoveAll(testDataDir) })
+
+	t.Run("new object format with global secrets", func(t *testing.T) {
+		content := `{
+			"services": [{"name":"svc","port":8080,"binary":"./testdata/test-binary"}],
+			"secrets": {"my-key": "my-value", "other-key": "other-value"}
+		}`
+		tmpFile := filepath.Join(t.TempDir(), "config.json")
+		os.WriteFile(tmpFile, []byte(content), 0644) //nolint:errcheck
+		cfg, err := Load(tmpFile)
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.Secrets["my-key"] != "my-value" {
+			t.Errorf("Secrets[my-key] = %q, want %q", cfg.Secrets["my-key"], "my-value")
+		}
+		if cfg.Secrets["other-key"] != "other-value" {
+			t.Errorf("Secrets[other-key] = %q, want %q", cfg.Secrets["other-key"], "other-value")
+		}
+	})
+
+	t.Run("legacy array format merges per-service secrets", func(t *testing.T) {
+		content := `[{"name":"svc","port":8080,"binary":"./testdata/test-binary","secrets":{"a":"1"}}]`
+		tmpFile := filepath.Join(t.TempDir(), "config.json")
+		os.WriteFile(tmpFile, []byte(content), 0644) //nolint:errcheck
+		cfg, err := Load(tmpFile)
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.Secrets["a"] != "1" {
+			t.Errorf("Secrets[a] = %q, want %q", cfg.Secrets["a"], "1")
+		}
+	})
+
+	t.Run("global secrets override per-service secrets for same key", func(t *testing.T) {
+		content := `{
+			"services": [{"name":"svc","port":8080,"binary":"./testdata/test-binary","secrets":{"key":"from-service"}}],
+			"secrets": {"key": "from-global"}
+		}`
+		tmpFile := filepath.Join(t.TempDir(), "config.json")
+		os.WriteFile(tmpFile, []byte(content), 0644) //nolint:errcheck
+		cfg, err := Load(tmpFile)
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.Secrets["key"] != "from-global" {
+			t.Errorf("Secrets[key] = %q, want global value %q", cfg.Secrets["key"], "from-global")
+		}
+	})
 }
 
 func TestApplyDefaults(t *testing.T) {

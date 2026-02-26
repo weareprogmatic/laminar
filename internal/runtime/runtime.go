@@ -150,7 +150,7 @@ func (s *Server) handleInvocationResponse(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	log.Printf("[Runtime API] Received %d bytes: %s", len(bodyBytes), string(bodyBytes))
+	log.Printf("[Runtime API] Received %d bytes: %s", len(bodyBytes), truncateJSONFields(bodyBytes, 64))
 
 	s.mu.Lock()
 	respCh := s.currentRespCh
@@ -184,6 +184,25 @@ func (s *Server) handleInvocationError(w http.ResponseWriter, r *http.Request) {
 		respCh <- invocationResp{err: fmt.Errorf("lambda error: %v", errorPayload)}
 	}
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// truncateJSONFields parses JSON and truncates each string field value to maxBytes bytes.
+// If the input is not valid JSON, the raw bytes are returned as-is.
+func truncateJSONFields(data []byte, maxBytes int) string {
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		return string(data)
+	}
+	for k, v := range m {
+		if s, ok := v.(string); ok && len(s) > maxBytes {
+			m[k] = s[:maxBytes] + "..."
+		}
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return string(data)
+	}
+	return string(out)
 }
 
 // Close gracefully shuts down the server.

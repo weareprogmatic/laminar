@@ -39,7 +39,8 @@ func (f *filteredWriter) Write(p []byte) (n int, err error) {
 
 		// Filter out expected/noisy AWS SDK messages
 		if strings.Contains(line, "got unexpected status code: 410") ||
-			(strings.Contains(line, "failed to GET") && strings.Contains(line, "/runtime/invocation/next")) {
+			(strings.Contains(line, "failed to GET") && strings.Contains(line, "/runtime/invocation/next")) ||
+			strings.Contains(line, "expected AWS Lambda environment variables") {
 			continue // Suppressed
 		}
 

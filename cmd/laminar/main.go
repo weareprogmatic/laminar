@@ -12,6 +12,7 @@ import (
 
 	"github.com/weareprogmatic/laminar/internal/config"
 	"github.com/weareprogmatic/laminar/internal/invoke"
+	"github.com/weareprogmatic/laminar/internal/secrets"
 	"github.com/weareprogmatic/laminar/internal/server"
 	"github.com/weareprogmatic/laminar/internal/version"
 )
@@ -35,25 +36,33 @@ func main() {
 	}
 
 	// Load configuration
-	services, err := config.Load(*configPath)
+	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
 	if *verbose {
-		log.Printf("Loaded %d service(s) from %s", len(services), *configPath)
-		for _, svc := range services {
+		log.Printf("Loaded %d service(s) from %s", len(cfg.Services), *configPath)
+		for _, svc := range cfg.Services {
 			log.Printf("  - %s: %s on port %d", svc.Name, svc.Binary, svc.Port)
 		}
 	}
 
 	// Start the mock Lambda Service API so that Lambda-to-Lambda calls
 	// (e.g. lambda.Invoke / lambda.InvokeAsync) resolve to local binaries.
-	cleanup, err := setupInvokeServer(services)
+	cleanup, err := setupInvokeServer(cfg.Services)
 	if err != nil {
 		log.Fatalf("Failed to start Lambda Service API: %v", err)
 	}
 	defer cleanup()
+
+	// Start the mock Secrets Manager API so that AWS SDK GetSecretValue calls
+	// resolve to values configured in laminar.json.
+	secretsCleanup, err := setupSecretsServer(cfg.Secrets, cfg.Services)
+	if err != nil {
+		log.Fatalf("Failed to start Secrets Manager API: %v", err)
+	}
+	defer secretsCleanup()
 
 	// Create cancellable context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -70,7 +79,7 @@ func main() {
 
 	// Start all servers
 	var wg sync.WaitGroup
-	for _, svc := range services {
+	for _, svc := range cfg.Services {
 		wg.Add(1)
 		go func(cfg config.ServiceConfig) {
 			defer wg.Done()
@@ -103,6 +112,29 @@ func setupInvokeServer(services []config.ServiceConfig) (func(), error) {
 		}
 		services[i].Env["AWS_ENDPOINT_URL_LAMBDA"] = endpoint
 		services[i].Env["AWS_LAMBDA_ENDPOINT"] = endpoint
+	}
+
+	return func() { _ = srv.Close() }, nil
+}
+
+// setupSecretsServer starts the mock Secrets Manager API and injects
+// AWS_ENDPOINT_URL_SECRETS_MANAGER into each service's environment so that
+// AWS SDK GetSecretValue calls resolve to values configured in laminar.json.
+// It returns a cleanup function that shuts down the server.
+func setupSecretsServer(globalSecrets map[string]string, services []config.ServiceConfig) (func(), error) {
+	srv, err := secrets.NewServer(globalSecrets)
+	if err != nil {
+		return nil, err
+	}
+	srv.Start()
+	log.Printf("Secrets Manager API listening on http://%s", srv.Addr())
+
+	endpoint := fmt.Sprintf("http://%s", srv.Addr())
+	for i := range services {
+		if services[i].Env == nil {
+			services[i].Env = make(map[string]string)
+		}
+		services[i].Env["AWS_ENDPOINT_URL_SECRETS_MANAGER"] = endpoint
 	}
 
 	return func() { _ = srv.Close() }, nil

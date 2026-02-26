@@ -14,6 +14,7 @@ Laminar is a high-performance Go CLI that orchestrates local AWS Lambda endpoint
 - **Warm Process Model**: Lambda processes start at Laminar startup and stay alive between requests, mirroring real AWS Lambda warm-container behaviour
 - **Lambda Payload V2.0**: Automatically maps HTTP requests to AWS Lambda Payload Version 2.0 format
 - **Lambda-to-Lambda Calls**: Built-in mock Lambda Service API so one Lambda can invoke another locally using the standard AWS SDK, with zero code changes
+- **Secrets Manager**: Built-in mock Secrets Manager API so Lambda functions can call `GetSecretValue` locally using the standard AWS SDK, with zero code changes
 - **Response Modes**: Parse Lambda structured responses or stream raw output
 - **Environment Management**: Load environment variables from `.env` files per service
 - **CORS Support**: Built-in middleware for cross-origin requests matching AWS Lambda Function URL behavior
@@ -63,17 +64,19 @@ go build -o artifacts/my-lambda ./path/to/your/lambda
 3. **Create `laminar.json`**:
 
 ```json
-[
-  {
-    "name": "my-service",
-    "port": 8080,
-    "binary": "./artifacts/my-lambda",
-    "cors": ["*"],
-    "methods": ["GET", "POST"],
-    "response_mode": "lambda",
-    "timeout": 30
-  }
-]
+{
+  "services": [
+    {
+      "name": "my-service",
+      "port": 8080,
+      "binary": "./artifacts/my-lambda",
+      "cors": ["*"],
+      "methods": ["GET", "POST"],
+      "response_mode": "lambda",
+      "timeout": 30
+    }
+  ]
+}
 ```
 
 4. **Run Laminar**:
@@ -92,6 +95,31 @@ curl http://localhost:8080
 
 ## Configuration Reference
 
+### Configuration Format
+
+Laminar supports two `laminar.json` formats:
+
+**New object format** (recommended) — define a top-level `secrets` object shared across all services:
+
+```json
+{
+  "services": [ ... ],
+  "secrets": {
+    "my-app/db-password": "local-dev-password"
+  }
+}
+```
+
+**Legacy array format** (still supported) — per-service `secrets` are merged into a single global namespace:
+
+```json
+[
+  { "name": "my-service", "port": 8080, "binary": "./artifacts/my-lambda", "secrets": { ... } }
+]
+```
+
+> When the same secret key appears in both a per-service `secrets` block and the top-level `secrets` object, the **top-level value wins**.
+
 ### Service Configuration Fields
 
 | Field | Type | Required | Default | Description |
@@ -103,8 +131,17 @@ curl http://localhost:8080
 | `methods` | array | | `[]` | CORS-only: sets `Access-Control-Allow-Methods` header (no request filtering) |
 | `response_mode` | string | | `"lambda"` | Response handling: `"lambda"` or `"raw"` |
 | `env_file` | string | | | Path to `.env` file for environment variables |
+| `env` | object | | | Inline key/value environment variables |
+| `secrets` | object | | | Per-service secrets (legacy) — prefer the top-level `secrets` object instead |
 | `timeout` | integer | | `30` | Execution timeout in seconds |
 | `debug_port` | integer | | | Delve debugger port — when set, wraps Lambda with `dlv exec --headless` |
+
+### Top-level Configuration Fields (object format only)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `services` | array | List of service configurations (same fields as above) |
+| `secrets` | object | Global Secrets Manager values shared across all services — keyed by secret name, returned by `GetSecretValue` |
 
 ### Response Modes
 
@@ -149,20 +186,22 @@ Both invocation types are supported:
 **Example `laminar.json` with two services:**
 
 ```json
-[
-  {
-    "name": "api-service",
-    "port": 8080,
-    "binary": "./artifacts/api-service",
-    "response_mode": "lambda"
-  },
-  {
-    "name": "worker-service",
-    "port": 8081,
-    "binary": "./artifacts/worker-service",
-    "response_mode": "lambda"
-  }
-]
+{
+  "services": [
+    {
+      "name": "api-service",
+      "port": 8080,
+      "binary": "./artifacts/api-service",
+      "response_mode": "lambda"
+    },
+    {
+      "name": "worker-service",
+      "port": 8081,
+      "binary": "./artifacts/worker-service",
+      "response_mode": "lambda"
+    }
+  ]
+}
 ```
 
 **Example — Go Lambda calling another Lambda:**
@@ -207,6 +246,91 @@ Because `AWS_ENDPOINT_URL_LAMBDA` is already set by Laminar, the AWS SDK routes 
 | Name with qualifier | `"worker-service:$LATEST"` | `worker-service` (qualifier stripped) |
 | Full ARN | `"arn:aws:lambda:us-east-1:123:function:worker-service"` | `worker-service` |
 
+### Secrets Manager
+
+Laminar automatically starts a mock **Secrets Manager API** alongside your services, so Lambda functions can call `GetSecretValue` (and `DescribeSecret`) using the standard AWS SDK — no real AWS credentials required.
+
+When Laminar starts, it:
+
+1. Starts a Secrets Manager API server on a random port.
+2. Injects `AWS_ENDPOINT_URL_SECRETS_MANAGER` into every Lambda process, pointing to that server.
+3. Returns values from the global `secrets` map in `laminar.json` keyed by secret name.
+
+The value is returned as-is in `SecretString`. Use a JSON string for structured credentials.
+
+Secrets are **global** — all services share the same namespace, matching real AWS Secrets Manager account-level scoping. Define them once in the top-level `secrets` object:
+
+**Recommended `laminar.json` (object format):**
+
+```json
+{
+  "services": [
+    {
+      "name": "api-service",
+      "port": 8080,
+      "binary": "./artifacts/api-service"
+    },
+    {
+      "name": "worker-service",
+      "port": 8081,
+      "binary": "./artifacts/worker-service"
+    }
+  ],
+  "secrets": {
+    "my-app/db-password": "local-dev-password",
+    "my-app/api-creds": "{\"key\":\"abc\",\"region\":\"us-east-1\"}"
+  }
+}
+```
+
+**Example — Go Lambda reading a secret:**
+
+```go
+import (
+    "context"
+    "encoding/json"
+
+    awsconfig "github.com/aws/aws-sdk-go-v2/config"
+    sm "github.com/aws/aws-sdk-go-v2/service/secretsmanager"
+    "github.com/aws/aws-sdk-go-v2/aws"
+)
+
+func handler(ctx context.Context, event MyEvent) (MyResponse, error) {
+    cfg, err := awsconfig.LoadDefaultConfig(ctx)
+    if err != nil {
+        return MyResponse{}, err
+    }
+    client := sm.NewFromConfig(cfg)
+
+    out, err := client.GetSecretValue(ctx, &sm.GetSecretValueInput{
+        SecretId: aws.String("my-app/db-password"),
+    })
+    if err != nil {
+        return MyResponse{}, err
+    }
+
+    password := aws.ToString(out.SecretString) // "local-dev-password"
+    _ = password
+    return MyResponse{Status: "ok"}, nil
+}
+```
+
+For structured secrets (e.g. credentials objects), unmarshal `SecretString` as JSON:
+
+```go
+var creds struct {
+    Key    string `json:"key"`
+    Region string `json:"region"`
+}
+if err := json.Unmarshal([]byte(aws.ToString(out.SecretString)), &creds); err != nil {
+    return MyResponse{}, err
+}
+```
+
+Because `AWS_ENDPOINT_URL_SECRETS_MANAGER` is already set by Laminar, the AWS SDK routes this call locally without any code changes between local and production environments.
+
+If a Lambda requests a secret not in the `secrets` map, it receives a `ResourceNotFoundException` with a message indicating which key to add to `laminar.json`.
+
 ### Environment Variables
 
 Create a `.env` file and reference it in your service config:
@@ -222,6 +346,7 @@ DATABASE_URL=postgresql://localhost/mydb
 - `LAMINAR_LOCAL=true` (always injected)
 - `AWS_REGION=us-east-1` (default if not set)
 - `AWS_ENDPOINT_URL_LAMBDA` / `AWS_LAMBDA_ENDPOINT` (points to Laminar's Lambda Service API for Lambda-to-Lambda calls)
+- `AWS_ENDPOINT_URL_SECRETS_MANAGER` (points to Laminar's Secrets Manager API)
 
 Variables from `.env` files override system environment variables.
 
@@ -286,14 +411,16 @@ Laminar has built-in Delve integration for step-through debugging of Lambda func
 1. **Add `debug_port` to your service config** (`laminar.json`):
 
 ```json
-[
-  {
-    "name": "my-service",
-    "port": 8080,
-    "binary": "./artifacts/my-lambda",
-    "debug_port": 2345
-  }
-]
+{
+  "services": [
+    {
+      "name": "my-service",
+      "port": 8080,
+      "binary": "./artifacts/my-lambda",
+      "debug_port": 2345
+    }
+  ]
+}
 ```
 
 When `debug_port` is set, the process timeout is automatically raised to at least **300 seconds**.
