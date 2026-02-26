@@ -18,6 +18,7 @@ func TestMapToLambda(t *testing.T) {
 			name: "simple GET request",
 			req: &http.Request{
 				Method:     "GET",
+				Host:       "localhost:8080",
 				URL:        mustParseURL("http://localhost:8080/test?foo=bar"),
 				Header:     http.Header{"User-Agent": []string{"test"}},
 				Proto:      "HTTP/1.1",
@@ -167,6 +168,41 @@ func TestSourceIPExtraction(t *testing.T) {
 
 			if payload.RequestContext.HTTP.SourceIP != tt.wantIP {
 				t.Errorf("SourceIP = %v, want %v", payload.RequestContext.HTTP.SourceIP, tt.wantIP)
+			}
+		})
+	}
+}
+
+func TestDomainName(t *testing.T) {
+	tests := []struct {
+		name       string
+		host       string
+		wantDomain string
+	}{
+		{"host with port", "localhost:8080", "localhost:8080"},
+		{"host without port", "example.local", "example.local"},
+		{"empty host fallback", "", "localhost"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &http.Request{
+				Method:     "GET",
+				Host:       tt.host,
+				URL:        mustParseURL("http://localhost:8080/"),
+				Header:     http.Header{},
+				Proto:      "HTTP/1.1",
+				RemoteAddr: "127.0.0.1:12345",
+				Body:       io.NopCloser(bytes.NewReader([]byte{})),
+			}
+
+			p, err := MapToLambda(req)
+			if err != nil {
+				t.Fatalf("MapToLambda() error = %v", err)
+			}
+
+			if p.RequestContext.DomainName != tt.wantDomain {
+				t.Errorf("DomainName = %q, want %q", p.RequestContext.DomainName, tt.wantDomain)
 			}
 		})
 	}

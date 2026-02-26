@@ -363,64 +363,6 @@ func TestLoggingMiddleware(t *testing.T) {
 	}
 }
 
-func TestMatchesPattern(t *testing.T) {
-	tests := []struct {
-		name     string
-		path     string
-		pattern  string
-		expected bool
-	}{
-		{"exact match", "/favicon.ico", "/favicon.ico", true},
-		{"exact mismatch", "/favicon.ico", "/other.ico", false},
-		{"prefix match", "/.well-known/appspecific/com.chrome.devtools.json", "/.well-known/*", true},
-		{"prefix match short", "/.well-known/", "/.well-known/*", true},
-		{"prefix mismatch", "/api/test", "/.well-known/*", false},
-		{"empty pattern", "/test", "", false},
-		{"wildcard only", "/test", "*", true},
-		{"partial prefix", "/api/test", "/api/*", true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := matchesPattern(tt.path, tt.pattern)
-			if result != tt.expected {
-				t.Errorf("matchesPattern(%q, %q) = %v, want %v", tt.path, tt.pattern, result, tt.expected)
-			}
-		})
-	}
-}
-
-func TestShouldLogPath(t *testing.T) {
-	tests := []struct {
-		name        string
-		ignorePaths []string
-		path        string
-		shouldLog   bool
-	}{
-		{"no ignore patterns", []string{}, "/test", true},
-		{"ignored exact match", []string{"/favicon.ico"}, "/favicon.ico", false},
-		{"not ignored", []string{"/favicon.ico"}, "/test", true},
-		{"ignored prefix match", []string{"/.well-known/*"}, "/.well-known/appspecific/com.chrome.devtools.json", false},
-		{"multiple patterns match", []string{"/favicon.ico", "/.well-known/*"}, "/.well-known/test", false},
-		{"multiple patterns no match", []string{"/favicon.ico", "/.well-known/*"}, "/api/test", true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := config.ServiceConfig{
-				Name:        "test",
-				Port:        8080,
-				IgnorePaths: tt.ignorePaths,
-			}
-			srv := New(cfg)
-			result := srv.shouldLogPath(tt.path)
-			if result != tt.shouldLog {
-				t.Errorf("shouldLogPath(%q) with patterns %v = %v, want %v", tt.path, tt.ignorePaths, result, tt.shouldLog)
-			}
-		})
-	}
-}
-
 func TestServerIntegration(t *testing.T) {
 	tmpDir := t.TempDir()
 	binaryPath := filepath.Join(tmpDir, "test-lambda")
@@ -439,7 +381,6 @@ echo '{"statusCode":200,"body":"Hello from fake Lambda"}'
 		Binary:       binaryPath,
 		Cors:         []string{"*"},
 		Methods:      []string{"GET", "POST"},
-		ContentTypes: []string{"application/json"},
 		AllowHeaders: []string{"Content-Type"},
 		ResponseMode: "lambda",
 		Timeout:      5,

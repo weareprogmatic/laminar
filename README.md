@@ -27,6 +27,8 @@ Laminar is a high-performance Go CLI that orchestrates local AWS Lambda endpoint
 go install github.com/weareprogmatic/laminar/cmd/laminar@latest
 ```
 
+> **Platform support:** Laminar is developed and tested on macOS. It should work on Linux and Windows, but has not been formally tested on those platforms.
+
 ## Quick Start
 
 1. **Create a Lambda binary** (see `examples/hello/main.go`):
@@ -97,9 +99,8 @@ curl http://localhost:8080
 | `name` | string | ✓ | | Service identifier — also used as the **function name** for Lambda-to-Lambda routing |
 | `port` | integer | ✓ | | HTTP port (1-65535) |
 | `binary` | string | ✓ | | Path to executable |
-| `cors` | array | | `[]` | Allowed CORS origins (use `[>"*"]` for all) |
+| `cors` | array | | `[]` | Allowed CORS origins (use `["*"]` for all) |
 | `methods` | array | | `[]` | CORS-only: sets `Access-Control-Allow-Methods` header (no request filtering) |
-| `content_type` | string | | `"application/json"` | Default Content-Type header |
 | `response_mode` | string | | `"lambda"` | Response handling: `"lambda"` or `"raw"` |
 | `env_file` | string | | | Path to `.env` file for environment variables |
 | `timeout` | integer | | `30` | Execution timeout in seconds |
@@ -245,7 +246,7 @@ Laminar maps HTTP requests to the AWS Lambda Payload Version 2.0 format:
   "requestContext": {
     "accountId": "123456789012",
     "apiId": "laminar-local",
-    "domainName": "localhost",
+    "domainName": "localhost:8080",
     "domainPrefix": "laminar",
     "http": {
       "method": "GET",
@@ -263,6 +264,12 @@ Laminar maps HTTP requests to the AWS Lambda Payload Version 2.0 format:
   "body": "{\"key\":\"value\"}",
   "isBase64Encoded": false
 }
+```
+
+`domainName` is set from the HTTP request's `Host` header (e.g. `localhost:8080`), so your Lambda can reconstruct its own URL:
+
+```go
+fullURL := fmt.Sprintf("http://%s%s", request.RequestContext.DomainName, request.RawPath)
 ```
 
 ## Debugging Lambda Functions

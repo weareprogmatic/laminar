@@ -89,6 +89,13 @@ func MapToLambda(r *http.Request) (LambdaPayloadV2, error) {
 		sourceIP = sourceIP[:idx]
 	}
 
+	// Use the request's Host header so Lambdas can reconstruct their own URL
+	// via request.RequestContext.DomainName (e.g. "localhost:8080").
+	domainName := r.Host
+	if domainName == "" {
+		domainName = "localhost"
+	}
+
 	return LambdaPayloadV2{
 		Version:               "2.0",
 		RouteKey:              "$default",
@@ -100,7 +107,7 @@ func MapToLambda(r *http.Request) (LambdaPayloadV2, error) {
 		RequestContext: RequestContext{
 			AccountID:    "123456789012",
 			APIID:        "laminar-local",
-			DomainName:   "localhost",
+			DomainName:   domainName,
 			DomainPrefix: "laminar",
 			HTTP: RequestHTTP{
 				Method:    r.Method,

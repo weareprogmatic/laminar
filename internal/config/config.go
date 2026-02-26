@@ -15,7 +15,6 @@ type ServiceConfig struct {
 	Binary           string            `json:"binary"`
 	Cors             []string          `json:"cors"`
 	Methods          []string          `json:"methods"`
-	ContentTypes     []string          `json:"content_types"`
 	AllowHeaders     []string          `json:"allow_headers,omitempty"`
 	ExposeHeaders    []string          `json:"expose_headers,omitempty"`
 	MaxAge           int               `json:"max_age,omitempty"`
@@ -26,8 +25,6 @@ type ServiceConfig struct {
 	ResponseMode     string            `json:"response_mode,omitempty"`
 	Timeout          int               `json:"timeout,omitempty"`
 	DebugPort        int               `json:"debug_port,omitempty"`
-	Watch            *bool             `json:"watch,omitempty"`
-	IgnorePaths      []string          `json:"ignore_paths,omitempty"`
 }
 
 // Load reads and validates a Laminar configuration file.
@@ -138,10 +135,6 @@ func validateModes(svc ServiceConfig) error {
 }
 
 func applyDefaults(svc *ServiceConfig) {
-	if len(svc.ContentTypes) == 0 {
-		svc.ContentTypes = []string{"application/json"}
-	}
-
 	if svc.ResponseMode == "" {
 		svc.ResponseMode = "lambda"
 	}
@@ -157,12 +150,6 @@ func applyDefaults(svc *ServiceConfig) {
 
 	for i := range svc.Methods {
 		svc.Methods[i] = strings.ToUpper(svc.Methods[i])
-	}
-
-	// Watch defaults to true.
-	if svc.Watch == nil {
-		v := true
-		svc.Watch = &v
 	}
 }
 

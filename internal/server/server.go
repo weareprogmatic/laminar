@@ -65,7 +65,7 @@ func listenWithRetry(ctx context.Context, port int) (net.Listener, error) {
 func Start(ctx context.Context, cfg config.ServiceConfig) error {
 	srv := New(cfg)
 
-	warm, err := runner.StartWarm(ctx, cfg.Binary, cfg.EnvFile, cfg.Env, cfg.WorkingDir, cfg.DebugPort, *cfg.Watch)
+	warm, err := runner.StartWarm(ctx, cfg.Binary, cfg.EnvFile, cfg.Env, cfg.WorkingDir, cfg.DebugPort, true)
 	if err != nil {
 		return fmt.Errorf("failed to start lambda process: %w", err)
 	}
@@ -130,12 +130,6 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// Skip Lambda invocation for ignored paths
-	if !s.shouldLogPath(r.URL.Path) {
-		http.NotFound(w, r)
-		return
-	}
-
 	lambdaPayload, err := payload.MapToLambda(r)
 	if err != nil {
 		log.Printf("[%s] Error creating payload: %v", s.config.Name, err)
@@ -186,7 +180,7 @@ func (s *Server) handleLambdaResponse(w http.ResponseWriter, output []byte) {
 	}
 
 	if w.Header().Get("Content-Type") == "" {
-		w.Header().Set("Content-Type", s.config.ContentTypes[0])
+		w.Header().Set("Content-Type", "application/json")
 	}
 
 	w.WriteHeader(lambdaResp.StatusCode)
@@ -194,7 +188,7 @@ func (s *Server) handleLambdaResponse(w http.ResponseWriter, output []byte) {
 }
 
 func (s *Server) handleRawResponse(w http.ResponseWriter, output []byte) {
-	w.Header().Set("Content-Type", s.config.ContentTypes[0])
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(output)
 }
@@ -273,41 +267,8 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(wrapped, r)
 		duration := time.Since(start)
 
-		// Skip logging for ignored paths
-		if !s.shouldLogPath(r.URL.Path) {
-			return
-		}
-
 		log.Printf("[%s] %s %s %d %v", s.config.Name, r.Method, r.URL.Path, wrapped.statusCode, duration)
 	})
-}
-
-// shouldLogPath checks if a path should be logged based on ignore patterns.
-// Returns true if the path should be logged, false if it should be ignored.
-func (s *Server) shouldLogPath(path string) bool {
-	for _, pattern := range s.config.IgnorePaths {
-		if matchesPattern(path, pattern) {
-			return false
-		}
-	}
-	return true
-}
-
-// matchesPattern checks if a path matches an ignore pattern.
-// Supports exact matches and prefix matches (patterns ending with *).
-func matchesPattern(path, pattern string) bool {
-	if pattern == "" {
-		return false
-	}
-
-	// Prefix match (e.g., "/.well-known/*")
-	if len(pattern) > 0 && pattern[len(pattern)-1] == '*' {
-		prefix := pattern[:len(pattern)-1]
-		return len(path) >= len(prefix) && path[:len(prefix)] == prefix
-	}
-
-	// Exact match
-	return path == pattern
 }
 
 type responseWriter struct {

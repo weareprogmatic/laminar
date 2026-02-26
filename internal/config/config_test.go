@@ -246,7 +246,6 @@ func TestApplyDefaults(t *testing.T) {
 				Name:         "test",
 				Port:         8080,
 				Binary:       "/bin/test",
-				ContentTypes: []string{"application/json"},
 				ResponseMode: "lambda",
 				Timeout:      30,
 				Methods:      []string{},
@@ -258,7 +257,6 @@ func TestApplyDefaults(t *testing.T) {
 				Name:         "test",
 				Port:         8080,
 				Binary:       "/bin/test",
-				ContentTypes: []string{"text/plain"},
 				ResponseMode: "raw",
 				Timeout:      60,
 				Methods:      []string{"get", "post"},
@@ -267,7 +265,6 @@ func TestApplyDefaults(t *testing.T) {
 				Name:         "test",
 				Port:         8080,
 				Binary:       "/bin/test",
-				ContentTypes: []string{"text/plain"},
 				ResponseMode: "raw",
 				Timeout:      60,
 				Methods:      []string{"GET", "POST"},
@@ -286,7 +283,6 @@ func TestApplyDefaults(t *testing.T) {
 				Port:         8080,
 				Binary:       "/bin/test",
 				Cors:         []string{"*"},
-				ContentTypes: []string{"application/json"},
 				ResponseMode: "lambda",
 				Timeout:      30,
 				Methods:      []string{},
@@ -307,7 +303,6 @@ func TestApplyDefaults(t *testing.T) {
 				Port:         8080,
 				Binary:       "/bin/test",
 				Cors:         []string{"*"},
-				ContentTypes: []string{"application/json"},
 				ResponseMode: "lambda",
 				Timeout:      30,
 				Methods:      []string{},
@@ -320,9 +315,6 @@ func TestApplyDefaults(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			applyDefaults(&tt.input)
 
-			if len(tt.input.ContentTypes) != len(tt.expected.ContentTypes) || (len(tt.input.ContentTypes) > 0 && tt.input.ContentTypes[0] != tt.expected.ContentTypes[0]) {
-				t.Errorf("ContentTypes = %v, want %v", tt.input.ContentTypes, tt.expected.ContentTypes)
-			}
 			if tt.input.ResponseMode != tt.expected.ResponseMode {
 				t.Errorf("ResponseMode = %v, want %v", tt.input.ResponseMode, tt.expected.ResponseMode)
 			}
