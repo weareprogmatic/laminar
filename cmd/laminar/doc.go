@@ -21,7 +21,6 @@
 //   - AWS Runtime API: Implements the official AWS Lambda Runtime API protocol
 //   - Fork-per-Request: Each HTTP request spawns a new process, enabling VS Code debugging
 //   - Lambda Payload V2.0: Maps HTTP requests to official AWS Lambda format
-//   - Streaming Support: Full support for SSE and streaming responses
 //   - CORS Support: Built-in CORS middleware matching AWS Lambda Function URL behavior
 //   - Graceful Shutdown: Handles SIGINT/SIGTERM with proper cleanup
 //

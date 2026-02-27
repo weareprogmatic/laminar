@@ -22,7 +22,7 @@
       "X-Request-Id"
     ],
     "max_age": 3600,
-    "allow_credentials": false,
+    "allow_credentials": true,
     "response_mode": "lambda",
     "timeout": 30,
     "ignore_paths": [

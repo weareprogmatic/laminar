@@ -422,6 +422,10 @@ func buildEnv(envFile string, envVars map[string]string, runtimeAPIPort int) ([]
 	// Set AWS_LAMBDA_RUNTIME_API to our mock runtime server
 	env = setOrReplaceEnv(env, "AWS_LAMBDA_RUNTIME_API", fmt.Sprintf("127.0.0.1:%d", runtimeAPIPort))
 
+	// Also set AWS_LAMBDA_FUNCTION_NAME - another common used variable to check if we're running in Lambda.
+	// This is not strictly required but can help with some libraries that check for it.
+	env = setOrReplaceEnv(env, "AWS_LAMBDA_FUNCTION_NAME", "laminar-function")
+
 	if !hasEnvVar(env, "AWS_REGION") {
 		env = append(env, "AWS_REGION=us-east-1")
 	}

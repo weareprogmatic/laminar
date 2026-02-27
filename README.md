@@ -129,6 +129,10 @@ Laminar supports two `laminar.json` formats:
 | `binary` | string | ✓ | | Path to executable |
 | `cors` | array | | `[]` | Allowed CORS origins (use `["*"]` for all) |
 | `methods` | array | | `[]` | CORS-only: sets `Access-Control-Allow-Methods` header (no request filtering) |
+| `allow_headers` | array | | `["Content-Type"]` | Sets `Access-Control-Allow-Headers` (defaults applied when `cors` is set) |
+| `expose_headers` | array | | `[]` | Sets `Access-Control-Expose-Headers` |
+| `max_age` | integer | | `0` | Sets `Access-Control-Max-Age` in seconds (0-86400) |
+| `allow_credentials` | boolean | | `false` | Sets `Access-Control-Allow-Credentials: true` when enabled |
 | `response_mode` | string | | `"lambda"` | Response handling: `"lambda"` or `"raw"` |
 | `env_file` | string | | | Path to `.env` file for environment variables |
 | `env` | object | | | Inline key/value environment variables |
