@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -233,5 +235,161 @@ func TestClose(t *testing.T) {
 	_, err = client.Get(fmt.Sprintf("http://127.0.0.1:%d/health", srv.port))
 	if err == nil {
 		t.Errorf("Expected connection to fail after Close(), but it succeeded")
+	}
+}
+
+func TestReadStreamPrelude(t *testing.T) {
+	sep := make([]byte, 8) // 8 null bytes
+
+	tests := []struct {
+		name       string
+		input      []byte
+		wantCode   int
+		wantHeader string
+		wantBody   string
+		wantErr    bool
+	}{
+		{
+			name:       "status and header",
+			input:      append(append([]byte(`{"statusCode":201,"headers":{"Content-Type":"text/plain"}}`), sep...), []byte("hello stream")...),
+			wantCode:   201,
+			wantHeader: "text/plain",
+			wantBody:   "hello stream",
+		},
+		{
+			name:     "empty body after separator",
+			input:    append([]byte(`{"statusCode":200}`), sep...),
+			wantCode: 200,
+			wantBody: "",
+		},
+		{
+			name:    "missing separator",
+			input:   []byte(`{"statusCode":200}`),
+			wantErr: true,
+		},
+		{
+			name:    "invalid prelude JSON",
+			input:   append([]byte(`not-json`), sep...),
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prelude, body, err := readStreamPrelude(bytes.NewReader(tt.input))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("readStreamPrelude() expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("readStreamPrelude() unexpected error: %v", err)
+			}
+			if prelude.StatusCode != tt.wantCode {
+				t.Errorf("StatusCode = %d, want %d", prelude.StatusCode, tt.wantCode)
+			}
+			if tt.wantHeader != "" {
+				if got := prelude.Headers["Content-Type"]; got != tt.wantHeader {
+					t.Errorf("Content-Type = %q, want %q", got, tt.wantHeader)
+				}
+			}
+			gotBody, _ := io.ReadAll(body)
+			if string(gotBody) != tt.wantBody {
+				t.Errorf("body = %q, want %q", gotBody, tt.wantBody)
+			}
+		})
+	}
+}
+
+func TestInvokeStream(t *testing.T) {
+	srv, err := NewServer()
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	defer srv.Close()
+	srv.Start()
+	time.Sleep(100 * time.Millisecond)
+
+	sep := make([]byte, 8)
+	preludeJSON := `{"statusCode":202,"headers":{"X-Custom":"yes"}}`
+	streamBody := "chunk1chunk2"
+	wireBody := append(append([]byte(preludeJSON), sep...), []byte(streamBody)...)
+
+	type streamResult struct {
+		resp *StreamResp
+		done func()
+		err  error
+	}
+	resultCh := make(chan streamResult, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		resp, done, err := srv.InvokeStream(ctx, []byte(`{}`))
+		resultCh <- streamResult{resp, done, err}
+	}()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	nextURL := fmt.Sprintf("http://127.0.0.1:%d/2018-06-01/runtime/invocation/next", srv.port)
+
+	// Simulate Lambda: GET /next
+	nextResp, err := client.Get(nextURL)
+	if err != nil {
+		t.Fatalf("GET /next error: %v", err)
+	}
+	_ = nextResp.Body.Close()
+
+	// Simulate Lambda: POST streaming /response
+	postURL := fmt.Sprintf("http://127.0.0.1:%d/2018-06-01/runtime/invocation/mock-request-id/response", srv.port)
+	req, _ := http.NewRequest(http.MethodPost, postURL, bytes.NewReader(wireBody))
+	req.Header.Set("Lambda-Runtime-Function-Response-Mode", "streaming")
+	req.Header.Set("Content-Type", "application/vnd.awslambda.http-integration-response")
+
+	postDone := make(chan *http.Response, 1)
+	go func() {
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Errorf("POST streaming response error: %v", err)
+			postDone <- nil
+			return
+		}
+		postDone <- resp
+	}()
+
+	// Wait for InvokeStream to return the StreamResp
+	r := <-resultCh
+	if r.err != nil {
+		t.Fatalf("InvokeStream() error = %v", r.err)
+	}
+	if r.resp == nil {
+		t.Fatal("InvokeStream() returned nil resp")
+	}
+
+	if r.resp.StatusCode != 202 {
+		t.Errorf("StatusCode = %d, want 202", r.resp.StatusCode)
+	}
+	if r.resp.Headers["X-Custom"] != "yes" {
+		t.Errorf("X-Custom header = %q, want %q", r.resp.Headers["X-Custom"], "yes")
+	}
+
+	// Read streaming body
+	gotBody, err := io.ReadAll(r.resp.Body)
+	if err != nil {
+		t.Fatalf("reading stream body: %v", err)
+	}
+	if !strings.Contains(string(gotBody), streamBody) {
+		t.Errorf("stream body = %q, want to contain %q", gotBody, streamBody)
+	}
+
+	// Signal done — this lets the POST handler return
+	r.done()
+
+	// Confirm the POST returned 202
+	postResp := <-postDone
+	if postResp != nil {
+		defer postResp.Body.Close()
+		if postResp.StatusCode != http.StatusAccepted {
+			t.Errorf("POST status = %d, want %d", postResp.StatusCode, http.StatusAccepted)
+		}
 	}
 }

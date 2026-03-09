@@ -24,6 +24,7 @@ type ServiceConfig struct {
 	Secrets          map[string]string `json:"secrets,omitempty"`
 	WorkingDir       string            `json:"working_dir,omitempty"`
 	ResponseMode     string            `json:"response_mode,omitempty"`
+	InvokeMode       string            `json:"invoke_mode,omitempty"`
 	Timeout          int               `json:"timeout,omitempty"`
 	DebugPort        int               `json:"debug_port,omitempty"`
 }
@@ -180,10 +181,13 @@ func validateDebugPort(svc ServiceConfig) error {
 	return nil
 }
 
-// validateModes checks response_mode for a single service.
+// validateModes checks response_mode and invoke_mode for a single service.
 func validateModes(svc ServiceConfig) error {
 	if svc.ResponseMode != "" && svc.ResponseMode != "lambda" && svc.ResponseMode != "raw" {
 		return fmt.Errorf("service %s: response_mode must be 'lambda' or 'raw', got %s", svc.Name, svc.ResponseMode)
+	}
+	if svc.InvokeMode != "" && svc.InvokeMode != "RESPONSE_STREAM" {
+		return fmt.Errorf("service %s: invoke_mode must be 'RESPONSE_STREAM' or empty, got %s", svc.Name, svc.InvokeMode)
 	}
 	return nil
 }

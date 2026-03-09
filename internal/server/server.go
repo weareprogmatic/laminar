@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -35,6 +36,14 @@ func (s *Server) invokeLambda(ctx context.Context, payload []byte) ([]byte, erro
 		return s.warm.Invoke(ctx, payload)
 	}
 	return runner.Run(ctx, s.config.Binary, s.config.EnvFile, s.config.Env, s.config.WorkingDir, s.config.Timeout, s.config.DebugPort, payload)
+}
+
+// invokeLambdaStream runs the Lambda and returns a streaming response.
+func (s *Server) invokeLambdaStream(ctx context.Context, payload []byte) (*runner.StreamResp, func(), error) {
+	if s.warm != nil {
+		return s.warm.InvokeStream(ctx, payload)
+	}
+	return runner.RunStream(ctx, s.config.Binary, s.config.EnvFile, s.config.Env, s.config.WorkingDir, s.config.Timeout, s.config.DebugPort, payload)
 }
 
 // listenWithRetry tries to bind the TCP port up to maxAttempts times, waiting
@@ -144,6 +153,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.config.InvokeMode == "RESPONSE_STREAM" {
+		s.handleStreamRequest(w, r, payloadBytes)
+		return
+	}
+
 	output, err := s.invokeLambda(ctx, payloadBytes)
 	if err != nil {
 		log.Printf("[%s] Error executing binary: %v", s.config.Name, err)
@@ -155,6 +169,60 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		s.handleLambdaResponse(w, output)
 	} else {
 		s.handleRawResponse(w, output)
+	}
+}
+
+// handleStreamRequest proxies a RESPONSE_STREAM Lambda invocation to the HTTP client.
+// It reads the prelude for status/headers, then streams body bytes with chunked transfer.
+func (s *Server) handleStreamRequest(w http.ResponseWriter, r *http.Request, payloadBytes []byte) {
+	ctx := r.Context()
+	resp, done, err := s.invokeLambdaStream(ctx, payloadBytes)
+	if err != nil {
+		log.Printf("[%s] Error executing streaming binary: %v", s.config.Name, err)
+		http.Error(w, fmt.Sprintf("Error executing binary: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer done()
+
+	for key, value := range resp.Headers {
+		w.Header().Set(key, value)
+	}
+	for _, cookie := range resp.Cookies {
+		w.Header().Add("Set-Cookie", cookie)
+	}
+
+	statusCode := resp.StatusCode
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+	w.WriteHeader(statusCode)
+
+	flusher, canFlush := w.(http.Flusher)
+	// Flush immediately after WriteHeader to force chunked transfer encoding.
+	// Without this, Go's net/http may sniff a Content-Length if the first Read
+	// returns all the data before Flush is called in the loop.
+	if canFlush {
+		flusher.Flush()
+	}
+	buf := make([]byte, 4096)
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+				log.Printf("[%s] Stream write error: %v", s.config.Name, writeErr)
+				return
+			}
+			if canFlush {
+				flusher.Flush()
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			log.Printf("[%s] Stream read error: %v", s.config.Name, readErr)
+			return
+		}
 	}
 }
 
@@ -279,4 +347,12 @@ type responseWriter struct {
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.statusCode = code
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+// Flush delegates to the underlying ResponseWriter so streaming responses
+// can use chunked transfer encoding through the logging middleware wrapper.
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }

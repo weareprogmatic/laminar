@@ -180,6 +180,10 @@ func launch(ctx context.Context, binary, envFile string, envVars map[string]stri
 	return &lambdaCmd{cmd: cmd, server: srv, ctx: timeoutCtx, cancel: cancel}, nil
 }
 
+// StreamResp is the streaming Lambda response type. Re-exported so that the
+// server package does not need to import the runtime package directly.
+type StreamResp = runtime.StreamResp
+
 // Run executes a binary with the given environment and payload, returning the Lambda response.
 // It starts a mock AWS Lambda Runtime API server that the Lambda will call back to.
 // Use StartWarm for persistent (keep-alive) execution; Run is for single-shot invocations.
@@ -200,6 +204,34 @@ func Run(ctx context.Context, binary, envFile string, envVars map[string]string,
 		return nil, invokeErr
 	}
 	return result, nil
+}
+
+// RunStream executes a binary for a single streaming invocation.
+// Use StartWarm for persistent execution; RunStream is for single-shot invocations (e.g. tests).
+func RunStream(ctx context.Context, binary, envFile string, envVars map[string]string, workingDir string, timeoutSeconds, debugPort int, payloadBytes []byte) (*StreamResp, func(), error) {
+	lc, err := launch(ctx, binary, envFile, envVars, workingDir, timeoutSeconds, debugPort)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	resp, done, invokeErr := lc.server.InvokeStream(lc.ctx, payloadBytes)
+	if invokeErr != nil {
+		lc.cancel()
+		_ = lc.server.Close()
+		go func() { _ = lc.cmd.Wait() }()
+		if lc.ctx.Err() != nil {
+			return nil, nil, fmt.Errorf("binary %s timed out after %d seconds", binary, timeoutSeconds)
+		}
+		return nil, nil, invokeErr
+	}
+
+	cleanup := func() {
+		done()
+		lc.cancel()
+		_ = lc.server.Close()
+		go func() { _ = lc.cmd.Wait() }()
+	}
+	return resp, cleanup, nil
 }
 
 // WarmLambda keeps a Lambda process alive between invocations, matching real Lambda warm-start
@@ -387,6 +419,32 @@ func (wl *WarmLambda) Invoke(ctx context.Context, payload []byte) ([]byte, error
 		return r.resp, r.err
 	case <-deadCh:
 		return nil, fmt.Errorf("lambda process %s exited unexpectedly", wl.binary)
+	}
+}
+
+// InvokeStream sends a payload to the warm Lambda and returns a streaming response.
+// The caller MUST call the returned done function after consuming the response Body.
+func (wl *WarmLambda) InvokeStream(ctx context.Context, payload []byte) (*StreamResp, func(), error) {
+	wl.mu.Lock()
+	srv := wl.server
+	deadCh := wl.deadCh
+	wl.mu.Unlock()
+
+	type streamResult struct {
+		resp *StreamResp
+		done func()
+		err  error
+	}
+	ch := make(chan streamResult, 1)
+	go func() {
+		resp, done, err := srv.InvokeStream(ctx, payload)
+		ch <- streamResult{resp, done, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.resp, r.done, r.err
+	case <-deadCh:
+		return nil, nil, fmt.Errorf("lambda process %s exited unexpectedly", wl.binary)
 	}
 }
 

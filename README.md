@@ -26,6 +26,7 @@ Laminar is a high-performance Go CLI that orchestrates local AWS Lambda endpoint
 
 ```bash
 go install github.com/weareprogmatic/laminar/cmd/laminar@latest
+go install ./cmd/laminar
 ```
 
 > **Platform support:** Laminar is developed and tested on macOS. It should work on Linux and Windows, but has not been formally tested on those platforms.
