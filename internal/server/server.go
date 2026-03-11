@@ -173,7 +173,10 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleStreamRequest proxies a RESPONSE_STREAM Lambda invocation to the HTTP client.
-// It reads the prelude for status/headers, then streams body bytes with chunked transfer.
+// For SSE (text/event-stream) it streams body bytes with chunked transfer encoding.
+// For all other content types it buffers the full body and writes a normal response,
+// which prevents hangs for endpoints that return short JSON payloads from a Lambda
+// registered with invoke_mode: "RESPONSE_STREAM".
 func (s *Server) handleStreamRequest(w http.ResponseWriter, r *http.Request, payloadBytes []byte) {
 	ctx := r.Context()
 	resp, done, err := s.invokeLambdaStream(ctx, payloadBytes)
@@ -184,6 +187,27 @@ func (s *Server) handleStreamRequest(w http.ResponseWriter, r *http.Request, pay
 	}
 	defer done()
 
+	if isStreamingContentType(resp.Headers) {
+		s.writeStreamingResponse(w, resp)
+	} else {
+		s.writeBufferedStreamResponse(w, resp)
+	}
+}
+
+// isStreamingContentType returns true when the prelude headers indicate a
+// genuinely streaming response (e.g. SSE) that should be forwarded with
+// chunked transfer encoding instead of being buffered.
+func isStreamingContentType(headers map[string]string) bool {
+	for key, value := range headers {
+		if strings.EqualFold(key, "content-type") && strings.HasPrefix(value, "text/event-stream") {
+			return true
+		}
+	}
+	return false
+}
+
+// writeStreamingResponse streams the body to the client using chunked transfer encoding.
+func (s *Server) writeStreamingResponse(w http.ResponseWriter, resp *runner.StreamResp) {
 	for key, value := range resp.Headers {
 		w.Header().Set(key, value)
 	}
@@ -224,6 +248,39 @@ func (s *Server) handleStreamRequest(w http.ResponseWriter, r *http.Request, pay
 			return
 		}
 	}
+}
+
+// writeBufferedStreamResponse reads the entire body from a streaming Lambda response,
+// then writes it as a normal HTTP response with Content-Length. This is used for
+// non-SSE endpoints (e.g. JSON APIs) that share a Lambda registered with
+// invoke_mode: "RESPONSE_STREAM".
+func (s *Server) writeBufferedStreamResponse(w http.ResponseWriter, resp *runner.StreamResp) {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("[%s] Error reading stream body: %v", s.config.Name, err)
+		http.Error(w, "Error reading response body", http.StatusInternalServerError)
+		return
+	}
+
+	for key, value := range resp.Headers {
+		w.Header().Set(key, value)
+	}
+	for _, cookie := range resp.Cookies {
+		w.Header().Add("Set-Cookie", cookie)
+	}
+
+	if w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "application/json")
+	}
+
+	statusCode := resp.StatusCode
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	w.WriteHeader(statusCode)
+	_, _ = w.Write(body)
 }
 
 func (s *Server) handleLambdaResponse(w http.ResponseWriter, output []byte) {

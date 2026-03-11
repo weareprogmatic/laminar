@@ -416,3 +416,56 @@ echo '{"statusCode":200,"body":"Hello from fake Lambda"}'
 
 	_ = ctx
 }
+
+func TestIsStreamingContentType(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers map[string]string
+		want    bool
+	}{
+		{
+			name:    "SSE content type",
+			headers: map[string]string{"Content-Type": "text/event-stream"},
+			want:    true,
+		},
+		{
+			name:    "SSE with charset",
+			headers: map[string]string{"Content-Type": "text/event-stream; charset=utf-8"},
+			want:    true,
+		},
+		{
+			name:    "lowercase content-type key",
+			headers: map[string]string{"content-type": "text/event-stream"},
+			want:    true,
+		},
+		{
+			name:    "JSON content type",
+			headers: map[string]string{"Content-Type": "application/json"},
+			want:    false,
+		},
+		{
+			name:    "no content-type header",
+			headers: map[string]string{},
+			want:    false,
+		},
+		{
+			name:    "nil headers",
+			headers: nil,
+			want:    false,
+		},
+		{
+			name:    "text/plain",
+			headers: map[string]string{"Content-Type": "text/plain"},
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isStreamingContentType(tt.headers)
+			if got != tt.want {
+				t.Errorf("isStreamingContentType(%v) = %v, want %v", tt.headers, got, tt.want)
+			}
+		})
+	}
+}
