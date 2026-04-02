@@ -89,12 +89,18 @@ func waitForDebugPort(ctx context.Context, addr string, processDone <-chan struc
 	}
 }
 
-// startProcess creates and starts the Lambda binary (optionally wrapped with dlv).
-func startProcess(ctx context.Context, binary, workingDir string, env []string, debugPort int) (*exec.Cmd, error) {
+// startProcess creates and starts the Lambda binary, optionally wrapped with a debugger.
+//
+// For dlv: dlv wraps and owns the binary; returns the dlv cmd.
+// For lldb: the binary is started normally and its PID is logged so the developer
+// can attach VS Code (CodeLLDB) using the process picker. No server is started.
+// For no debug: the binary is started as-is.
+func startProcess(ctx context.Context, binary, workingDir string, env []string, debugPort int, debugger string) (*exec.Cmd, error) {
 	logWriter := &filteredWriter{serviceName: "lambda"}
 	var cmd *exec.Cmd
-	if debugPort > 0 {
-		killDebuggerOnPort(debugPort)
+	if debugPort > 0 && debugger != "lldb" {
+		// dlv wraps the binary; the dlv process IS the thing we monitor for liveness.
+		killDebuggerOnPort(debugPort, debugger)
 		cmd = exec.CommandContext(ctx, "dlv", "exec", //nolint:gosec // args are controlled
 			"--headless",
 			"--listen=127.0.0.1:"+strconv.Itoa(debugPort),
@@ -114,16 +120,21 @@ func startProcess(ctx context.Context, binary, workingDir string, env []string, 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start binary %s: %w", binary, err)
 	}
+	if debugger == "lldb" {
+		log.Printf("[Lambda] PID %d — attach CodeLLDB now (use 'Attach by PID' or search for '%s')",
+			cmd.Process.Pid, binary)
+	}
 	return cmd, nil
 }
 
 // awaitDebugPort waits for the debug port to be ready and logs when it is.
-// Returns nil immediately when debugPort is 0. Cleans up on error.
+// Returns nil immediately when debugPort is 0 or debugger is "lldb" (lldb attaches
+// directly by PID — no port is opened).
 // processDone, if non-nil, is closed when the process exits — this lets us
 // fail fast instead of polling until ctx expires. When processDone fires the
 // caller is responsible for cmd.Wait(), so we skip it here.
-func awaitDebugPort(ctx context.Context, cmd *exec.Cmd, srv *runtime.Server, cancel context.CancelFunc, debugPort int, processDone <-chan struct{}) error {
-	if debugPort == 0 {
+func awaitDebugPort(ctx context.Context, cmd *exec.Cmd, srv *runtime.Server, cancel context.CancelFunc, debugPort int, debugger string, processDone <-chan struct{}) error {
+	if debugPort == 0 || debugger == "lldb" {
 		return nil
 	}
 	addr := "127.0.0.1:" + strconv.Itoa(debugPort)
@@ -137,16 +148,26 @@ func awaitDebugPort(ctx context.Context, cmd *exec.Cmd, srv *runtime.Server, can
 		}
 		cancel()
 		_ = srv.Close()
-		return fmt.Errorf("delve failed to start on %s: %w", addr, err)
+		return fmt.Errorf("%s debugger failed to start on %s: %w", effectiveDebugger(debugger), addr, err)
 	}
-	log.Printf("[Lambda] Debugger ready on 127.0.0.1:%d – attach your IDE now", debugPort)
+	log.Printf("[Lambda] Debugger (%s) ready on 127.0.0.1:%d – attach your IDE now", effectiveDebugger(debugger), debugPort)
 	return nil
+}
+
+// effectiveDebugger returns the canonical debugger name, defaulting to "dlv".
+func effectiveDebugger(debugger string) string {
+	if debugger == "" {
+		return "dlv"
+	}
+	return debugger
 }
 
 // launch creates a runtime API server, builds the environment, and starts the Lambda binary.
 // On error all resources are cleaned up before returning.
-func launch(ctx context.Context, binary, envFile string, envVars map[string]string, workingDir string, timeoutSeconds, debugPort int) (*lambdaCmd, error) {
-	if debugPort > 0 && timeoutSeconds < debugMinTimeout {
+func launch(ctx context.Context, binary, envFile string, envVars map[string]string, workingDir string, timeoutSeconds, debugPort int, debugger string) (*lambdaCmd, error) {
+	// Enforce a minimum timeout whenever a debugger is configured — the developer
+	// needs time to attach before the first invocation times out.
+	if (debugPort > 0 || debugger == "lldb") && timeoutSeconds < debugMinTimeout {
 		timeoutSeconds = debugMinTimeout
 	}
 
@@ -166,14 +187,14 @@ func launch(ctx context.Context, binary, envFile string, envVars map[string]stri
 		return nil, fmt.Errorf("failed to build environment: %w", err)
 	}
 
-	cmd, err := startProcess(timeoutCtx, binary, workingDir, env, debugPort)
+	cmd, err := startProcess(timeoutCtx, binary, workingDir, env, debugPort, debugger)
 	if err != nil {
 		cancel()
 		_ = srv.Close()
 		return nil, err
 	}
 
-	if err := awaitDebugPort(timeoutCtx, cmd, srv, cancel, debugPort, nil); err != nil {
+	if err := awaitDebugPort(timeoutCtx, cmd, srv, cancel, debugPort, debugger, nil); err != nil {
 		return nil, err
 	}
 
@@ -187,8 +208,8 @@ type StreamResp = runtime.StreamResp
 // Run executes a binary with the given environment and payload, returning the Lambda response.
 // It starts a mock AWS Lambda Runtime API server that the Lambda will call back to.
 // Use StartWarm for persistent (keep-alive) execution; Run is for single-shot invocations.
-func Run(ctx context.Context, binary, envFile string, envVars map[string]string, workingDir string, timeoutSeconds, debugPort int, payloadBytes []byte) ([]byte, error) {
-	lc, err := launch(ctx, binary, envFile, envVars, workingDir, timeoutSeconds, debugPort)
+func Run(ctx context.Context, binary, envFile string, envVars map[string]string, workingDir string, timeoutSeconds, debugPort int, debugger string, payloadBytes []byte) ([]byte, error) {
+	lc, err := launch(ctx, binary, envFile, envVars, workingDir, timeoutSeconds, debugPort, debugger)
 	if err != nil {
 		return nil, err
 	}
@@ -208,8 +229,8 @@ func Run(ctx context.Context, binary, envFile string, envVars map[string]string,
 
 // RunStream executes a binary for a single streaming invocation.
 // Use StartWarm for persistent execution; RunStream is for single-shot invocations (e.g. tests).
-func RunStream(ctx context.Context, binary, envFile string, envVars map[string]string, workingDir string, timeoutSeconds, debugPort int, payloadBytes []byte) (*StreamResp, func(), error) {
-	lc, err := launch(ctx, binary, envFile, envVars, workingDir, timeoutSeconds, debugPort)
+func RunStream(ctx context.Context, binary, envFile string, envVars map[string]string, workingDir string, timeoutSeconds, debugPort int, debugger string, payloadBytes []byte) (*StreamResp, func(), error) {
+	lc, err := launch(ctx, binary, envFile, envVars, workingDir, timeoutSeconds, debugPort, debugger)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -250,20 +271,23 @@ type WarmLambda struct {
 	envVars   map[string]string
 	workDir   string
 	debugPort int
+	debugger  string
 	parentCtx context.Context
 }
 
 // StartWarm starts a persistent Lambda process.
-// When debugPort > 0 the binary is wrapped with Delve; this function returns only after the
+// When debugPort > 0 the binary is wrapped with dlv; this function returns only after the
 // debug port is confirmed open so the IDE can attach immediately.
+// When debugger is "lldb" the binary PID is logged and the developer attaches via CodeLLDB.
 // When watch is true a background goroutine monitors the binary for changes and restarts.
-func StartWarm(ctx context.Context, binary, envFile string, envVars map[string]string, workingDir string, debugPort int, watch bool) (*WarmLambda, error) {
+func StartWarm(ctx context.Context, binary, envFile string, envVars map[string]string, workingDir string, debugPort int, debugger string, watch bool) (*WarmLambda, error) {
 	wl := &WarmLambda{
 		binary:    binary,
 		envFile:   envFile,
 		envVars:   envVars,
 		workDir:   workingDir,
 		debugPort: debugPort,
+		debugger:  debugger,
 		parentCtx: ctx,
 	}
 
@@ -294,7 +318,7 @@ func (wl *WarmLambda) startProcess() error {
 	}
 
 	cancelCtx, cancel := context.WithCancel(wl.parentCtx)
-	cmd, err := startProcess(cancelCtx, wl.binary, wl.workDir, env, wl.debugPort)
+	cmd, err := startProcess(cancelCtx, wl.binary, wl.workDir, env, wl.debugPort, wl.debugger)
 	if err != nil {
 		cancel()
 		_ = srv.Close()
@@ -310,7 +334,7 @@ func (wl *WarmLambda) startProcess() error {
 		_ = srv.Close()
 	}()
 
-	if err := awaitDebugPort(cancelCtx, cmd, srv, cancel, wl.debugPort, deadCh); err != nil {
+	if err := awaitDebugPort(cancelCtx, cmd, srv, cancel, wl.debugPort, wl.debugger, deadCh); err != nil {
 		return err
 	}
 

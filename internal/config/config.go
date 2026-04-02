@@ -27,6 +27,7 @@ type ServiceConfig struct {
 	InvokeMode       string            `json:"invoke_mode,omitempty"`
 	Timeout          int               `json:"timeout,omitempty"`
 	DebugPort        int               `json:"debug_port,omitempty"`
+	Debugger         string            `json:"debugger,omitempty"`
 }
 
 // Config holds the complete Laminar configuration.
@@ -169,6 +170,9 @@ func validate(services []ServiceConfig) error {
 
 // validateDebugPort checks that debug_port is valid and doesn't conflict with the service port.
 func validateDebugPort(svc ServiceConfig) error {
+	if svc.Debugger != "" && svc.Debugger != "dlv" && svc.Debugger != "lldb" {
+		return fmt.Errorf("service %s: debugger must be 'dlv' or 'lldb', got %s", svc.Name, svc.Debugger)
+	}
 	if svc.DebugPort == 0 {
 		return nil
 	}

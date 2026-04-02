@@ -140,6 +140,7 @@ Laminar supports two `laminar.json` formats:
 | `secrets` | object | | | Per-service secrets (legacy) — prefer the top-level `secrets` object instead |
 | `timeout` | integer | | `30` | Execution timeout in seconds |
 | `debug_port` | integer | | | Delve debugger port — when set, wraps Lambda with `dlv exec --headless` |
+| `debugger` | string | | `"dlv"` | Debugger to use: `"dlv"` (Go) or `"lldb"` (non-Go: Rust, Zig, C/C++) |
 
 ### Top-level Configuration Fields (object format only)
 
@@ -492,6 +493,66 @@ Your breakpoints are hit on every request. The debug session stays alive between
 ### Lambda-to-Lambda Debugging
 
 If a target service has `debug_port` set and another Lambda invokes it via `client.Invoke()`, the invoked Lambda is also started warm with dlv on that port.
+
+### Debugging Non-Go Lambdas (Rust, Zig, C/C++) with LLDB
+
+For Lambda binaries not written in Go, use `"debugger": "lldb"` with the [CodeLLDB](https://marketplace.visualstudio.com/items?itemName=vadimcn.vscode-lldb) VS Code extension. No `debug_port` is needed — Laminar starts the binary normally, logs its PID, and you attach directly.
+
+#### Prerequisites
+
+- [CodeLLDB](https://marketplace.visualstudio.com/items?itemName=vadimcn.vscode-lldb) VS Code extension (`vadimcn.vscode-lldb`)
+- Binary compiled with debug symbols (e.g. `zig build -Doptimize=Debug`)
+
+#### Setup
+
+1. **Add `"debugger": "lldb"` to your service** (`laminar.json`):
+
+```json
+{
+  "services": [
+    {
+      "name": "my-zig-service",
+      "port": 8080,
+      "binary": "./zig-out/bin/bootstrap",
+      "debugger": "lldb",
+      "response_mode": "lambda",
+      "timeout": 30
+    }
+  ]
+}
+```
+
+No `debug_port` required. The process timeout is automatically raised to at least **300 seconds** when `"debugger": "lldb"` is set.
+
+2. **Add a launch configuration** (`.vscode/launch.json`):
+
+```json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "attach",
+      "name": "Attach LLDB (Laminar)",
+      "pid": "${command:pickProcess}"
+    }
+  ]
+}
+```
+
+3. **Start Laminar:**
+
+```bash
+laminar
+```
+
+Laminar logs the PID immediately:
+
+```
+[Lambda] PID 12345 — attach CodeLLDB now (search for 'bootstrap')
+```
+
+4. **Press F5 in VS Code**, type the binary name (`bootstrap`) in the process picker, and select your process. Breakpoints fire on every request.
 
 ## Health Checks
 

@@ -9,8 +9,12 @@ import (
 )
 
 // killDebuggerOnPort kills any existing dlv process listening on the given port.
+// Only relevant for dlv — lldb attaches by PID so no server is running.
 // Uses PowerShell WMI on Windows to locate the process by command line.
-func killDebuggerOnPort(port int) {
+func killDebuggerOnPort(port int, debugger string) {
+	if debugger == "lldb" {
+		return // lldb mode uses direct PID attach; no server to kill
+	}
 	addr := "127.0.0.1:" + strconv.Itoa(port)
 	// Match the dlv process by its --listen argument and kill it forcefully.
 	script := `Get-WmiObject Win32_Process | ` +

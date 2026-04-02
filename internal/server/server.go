@@ -35,7 +35,7 @@ func (s *Server) invokeLambda(ctx context.Context, payload []byte) ([]byte, erro
 	if s.warm != nil {
 		return s.warm.Invoke(ctx, payload)
 	}
-	return runner.Run(ctx, s.config.Binary, s.config.EnvFile, s.config.Env, s.config.WorkingDir, s.config.Timeout, s.config.DebugPort, payload)
+	return runner.Run(ctx, s.config.Binary, s.config.EnvFile, s.config.Env, s.config.WorkingDir, s.config.Timeout, s.config.DebugPort, s.config.Debugger, payload)
 }
 
 // invokeLambdaStream runs the Lambda and returns a streaming response.
@@ -43,7 +43,7 @@ func (s *Server) invokeLambdaStream(ctx context.Context, payload []byte) (*runne
 	if s.warm != nil {
 		return s.warm.InvokeStream(ctx, payload)
 	}
-	return runner.RunStream(ctx, s.config.Binary, s.config.EnvFile, s.config.Env, s.config.WorkingDir, s.config.Timeout, s.config.DebugPort, payload)
+	return runner.RunStream(ctx, s.config.Binary, s.config.EnvFile, s.config.Env, s.config.WorkingDir, s.config.Timeout, s.config.DebugPort, s.config.Debugger, payload)
 }
 
 // listenWithRetry tries to bind the TCP port up to maxAttempts times, waiting
@@ -74,7 +74,7 @@ func listenWithRetry(ctx context.Context, port int) (net.Listener, error) {
 func Start(ctx context.Context, cfg config.ServiceConfig) error {
 	srv := New(cfg)
 
-	warm, err := runner.StartWarm(ctx, cfg.Binary, cfg.EnvFile, cfg.Env, cfg.WorkingDir, cfg.DebugPort, true)
+	warm, err := runner.StartWarm(ctx, cfg.Binary, cfg.EnvFile, cfg.Env, cfg.WorkingDir, cfg.DebugPort, cfg.Debugger, true)
 	if err != nil {
 		return fmt.Errorf("failed to start lambda process: %w", err)
 	}

@@ -9,8 +9,12 @@ import (
 )
 
 // killDebuggerOnPort kills any existing dlv process listening on the given port.
+// Only relevant for dlv — lldb attaches by PID so no server is running.
 // Uses pkill which is available on Linux and macOS.
-func killDebuggerOnPort(port int) {
+func killDebuggerOnPort(port int, debugger string) {
+	if debugger == "lldb" {
+		return // lldb mode uses direct PID attach; no server to kill
+	}
 	addr := "127.0.0.1:" + strconv.Itoa(port)
 	// pkill -f matches the full command line; -9 ensures the process is gone immediately.
 	cmd := exec.Command("pkill", "-9", "-f", "dlv.*--listen="+addr) //nolint:gosec,noctx // port is from config
