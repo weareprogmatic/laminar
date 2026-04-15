@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -18,6 +19,10 @@ import (
 	"sync"
 	"time"
 )
+
+// ErrBusy is returned by TryInvoke / TryInvokeStream when the Lambda process
+// is already handling a request and cannot accept another one.
+var ErrBusy = errors.New("lambda runtime is busy")
 
 type invocationReq struct {
 	payload []byte
@@ -152,6 +157,59 @@ func (s *Server) InvokeStream(ctx context.Context, payload []byte) (*StreamResp,
 		}
 		if resp.stream == nil {
 			// Lambda sent a buffered response; wrap it so the caller still works.
+			return &StreamResp{
+				StatusCode: http.StatusOK,
+				Body:       bytes.NewReader(resp.body),
+			}, func() {}, nil
+		}
+		done := func() { close(resp.stream.done) }
+		return &resp.stream.resp, done, nil
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	case <-s.closeCh:
+		return nil, nil, fmt.Errorf("runtime server closed")
+	}
+}
+
+// TryInvoke is like Invoke but returns ErrBusy immediately if the Lambda process
+// has not called GET /next (i.e. it is still processing a previous request).
+func (s *Server) TryInvoke(ctx context.Context, payload []byte) ([]byte, error) {
+	respCh := make(chan invocationResp, 1)
+	select {
+	case s.invokeCh <- invocationReq{payload: payload, respCh: respCh}:
+	default:
+		return nil, ErrBusy
+	}
+	select {
+	case resp := <-respCh:
+		if resp.stream != nil {
+			_, _ = io.Copy(io.Discard, resp.stream.resp.Body)
+			close(resp.stream.done)
+			return nil, fmt.Errorf("lambda sent a streaming response but invoke_mode is not RESPONSE_STREAM")
+		}
+		return resp.body, resp.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.closeCh:
+		return nil, fmt.Errorf("runtime server closed")
+	}
+}
+
+// TryInvokeStream is like InvokeStream but returns ErrBusy immediately if the
+// Lambda process is still handling a previous request.
+func (s *Server) TryInvokeStream(ctx context.Context, payload []byte) (*StreamResp, func(), error) {
+	respCh := make(chan invocationResp, 1)
+	select {
+	case s.invokeCh <- invocationReq{payload: payload, respCh: respCh}:
+	default:
+		return nil, nil, ErrBusy
+	}
+	select {
+	case resp := <-respCh:
+		if resp.err != nil {
+			return nil, nil, resp.err
+		}
+		if resp.stream == nil {
 			return &StreamResp{
 				StatusCode: http.StatusOK,
 				Body:       bytes.NewReader(resp.body),

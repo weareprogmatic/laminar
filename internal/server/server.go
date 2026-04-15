@@ -74,7 +74,7 @@ func listenWithRetry(ctx context.Context, port int) (net.Listener, error) {
 func Start(ctx context.Context, cfg config.ServiceConfig) error {
 	srv := New(cfg)
 
-	warm, err := runner.StartWarm(ctx, cfg.Binary, cfg.EnvFile, cfg.Env, cfg.WorkingDir, cfg.DebugPort, cfg.Debugger, true)
+	warm, err := runner.StartWarm(ctx, cfg.Binary, cfg.EnvFile, cfg.Env, cfg.WorkingDir, cfg.Timeout, cfg.DebugPort, cfg.Debugger, true)
 	if err != nil {
 		return fmt.Errorf("failed to start lambda process: %w", err)
 	}

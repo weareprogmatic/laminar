@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -270,6 +271,7 @@ type WarmLambda struct {
 	envFile   string
 	envVars   map[string]string
 	workDir   string
+	timeout   int
 	debugPort int
 	debugger  string
 	parentCtx context.Context
@@ -280,12 +282,13 @@ type WarmLambda struct {
 // debug port is confirmed open so the IDE can attach immediately.
 // When debugger is "lldb" the binary PID is logged and the developer attaches via CodeLLDB.
 // When watch is true a background goroutine monitors the binary for changes and restarts.
-func StartWarm(ctx context.Context, binary, envFile string, envVars map[string]string, workingDir string, debugPort int, debugger string, watch bool) (*WarmLambda, error) {
+func StartWarm(ctx context.Context, binary, envFile string, envVars map[string]string, workingDir string, timeout, debugPort int, debugger string, watch bool) (*WarmLambda, error) {
 	wl := &WarmLambda{
 		binary:    binary,
 		envFile:   envFile,
 		envVars:   envVars,
 		workDir:   workingDir,
+		timeout:   timeout,
 		debugPort: debugPort,
 		debugger:  debugger,
 		parentCtx: ctx,
@@ -422,54 +425,35 @@ func (wl *WarmLambda) restart() {
 }
 
 // Invoke sends a payload to the warm Lambda and waits for the response.
-// Returns an error immediately if the Lambda process has exited.
+// If the warm process is already handling a request, a temporary cold-start
+// process is spawned to handle the overflow — matching real Lambda concurrency.
 func (wl *WarmLambda) Invoke(ctx context.Context, payload []byte) ([]byte, error) {
 	wl.mu.Lock()
 	srv := wl.server
-	deadCh := wl.deadCh
 	wl.mu.Unlock()
 
-	type result struct {
-		resp []byte
-		err  error
+	resp, err := srv.TryInvoke(ctx, payload)
+	if errors.Is(err, runtime.ErrBusy) {
+		log.Printf("[Lambda] Warm process busy — cold-starting overflow for %s", wl.binary)
+		return Run(ctx, wl.binary, wl.envFile, wl.envVars, wl.workDir, wl.timeout, 0, "", payload)
 	}
-	ch := make(chan result, 1)
-	go func() {
-		resp, err := srv.Invoke(ctx, payload)
-		ch <- result{resp, err}
-	}()
-	select {
-	case r := <-ch:
-		return r.resp, r.err
-	case <-deadCh:
-		return nil, fmt.Errorf("lambda process %s exited unexpectedly", wl.binary)
-	}
+	return resp, err
 }
 
 // InvokeStream sends a payload to the warm Lambda and returns a streaming response.
+// If the warm process is busy, a temporary cold-start process handles the overflow.
 // The caller MUST call the returned done function after consuming the response Body.
 func (wl *WarmLambda) InvokeStream(ctx context.Context, payload []byte) (*StreamResp, func(), error) {
 	wl.mu.Lock()
 	srv := wl.server
-	deadCh := wl.deadCh
 	wl.mu.Unlock()
 
-	type streamResult struct {
-		resp *StreamResp
-		done func()
-		err  error
+	resp, done, err := srv.TryInvokeStream(ctx, payload)
+	if errors.Is(err, runtime.ErrBusy) {
+		log.Printf("[Lambda] Warm process busy — cold-starting overflow for %s", wl.binary)
+		return RunStream(ctx, wl.binary, wl.envFile, wl.envVars, wl.workDir, wl.timeout, 0, "", payload)
 	}
-	ch := make(chan streamResult, 1)
-	go func() {
-		resp, done, err := srv.InvokeStream(ctx, payload)
-		ch <- streamResult{resp, done, err}
-	}()
-	select {
-	case r := <-ch:
-		return r.resp, r.done, r.err
-	case <-deadCh:
-		return nil, nil, fmt.Errorf("lambda process %s exited unexpectedly", wl.binary)
-	}
+	return resp, done, err
 }
 
 // Close shuts down the warm Lambda process and its runtime API server.
