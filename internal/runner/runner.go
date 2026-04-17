@@ -427,6 +427,10 @@ func (wl *WarmLambda) restart() {
 // Invoke sends a payload to the warm Lambda and waits for the response.
 // If the warm process is already handling a request, a temporary cold-start
 // process is spawned to handle the overflow — matching real Lambda concurrency.
+//
+// Overflow processes use a detached (background) context so that client-side
+// disconnects do not kill the Lambda mid-handler. The configured timeout still
+// caps the process lifetime and prevents leaked processes.
 func (wl *WarmLambda) Invoke(ctx context.Context, payload []byte) ([]byte, error) {
 	wl.mu.Lock()
 	srv := wl.server
@@ -435,7 +439,7 @@ func (wl *WarmLambda) Invoke(ctx context.Context, payload []byte) ([]byte, error
 	resp, err := srv.TryInvoke(ctx, payload)
 	if errors.Is(err, runtime.ErrBusy) {
 		log.Printf("[Lambda] Warm process busy — cold-starting overflow for %s", wl.binary)
-		return Run(ctx, wl.binary, wl.envFile, wl.envVars, wl.workDir, wl.timeout, 0, "", payload)
+		return Run(context.Background(), wl.binary, wl.envFile, wl.envVars, wl.workDir, wl.timeout, 0, "", payload)
 	}
 	return resp, err
 }
@@ -443,6 +447,10 @@ func (wl *WarmLambda) Invoke(ctx context.Context, payload []byte) ([]byte, error
 // InvokeStream sends a payload to the warm Lambda and returns a streaming response.
 // If the warm process is busy, a temporary cold-start process handles the overflow.
 // The caller MUST call the returned done function after consuming the response Body.
+//
+// Like Invoke, overflow processes use a detached context so that client disconnects
+// (e.g. a CVI provider closing after receiving all streamed data) do not kill the
+// Lambda while it runs post-response cleanup (saving state, provider teardown).
 func (wl *WarmLambda) InvokeStream(ctx context.Context, payload []byte) (*StreamResp, func(), error) {
 	wl.mu.Lock()
 	srv := wl.server
@@ -451,7 +459,7 @@ func (wl *WarmLambda) InvokeStream(ctx context.Context, payload []byte) (*Stream
 	resp, done, err := srv.TryInvokeStream(ctx, payload)
 	if errors.Is(err, runtime.ErrBusy) {
 		log.Printf("[Lambda] Warm process busy — cold-starting overflow for %s", wl.binary)
-		return RunStream(ctx, wl.binary, wl.envFile, wl.envVars, wl.workDir, wl.timeout, 0, "", payload)
+		return RunStream(context.Background(), wl.binary, wl.envFile, wl.envVars, wl.workDir, wl.timeout, 0, "", payload)
 	}
 	return resp, done, err
 }
