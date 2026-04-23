@@ -118,6 +118,12 @@ func startProcess(ctx context.Context, binary, workingDir string, env []string, 
 		cmd.Dir = workingDir
 	}
 	setProcAttrs(cmd)
+
+	cmd.Cancel = func() error {
+		return killProcess(cmd)
+	}
+	cmd.WaitDelay = 500 * time.Millisecond
+
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start binary %s: %w", binary, err)
 	}
